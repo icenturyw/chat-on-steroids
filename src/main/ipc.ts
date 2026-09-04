@@ -11,6 +11,10 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import { z } from 'zod';
 import {
+  DEFAULT_CLOUDFLARE_LOCAL_PORT,
+  normalizeCloudflarePublicOrigin
+} from '../shared/cloudflare.js';
+import {
   CAPABILITIES,
   GOAL_MODES,
   GOAL_REASONING_LEVELS,
@@ -114,7 +118,23 @@ const settingsPatch = z.object({
       .string()
       .max(128)
       .refine((v) => v === '' || TUNNEL_ID_PATTERN.test(v), 'Expected tunnel_ followed by 32 hex characters'),
-    binaryPath: z.string().max(4096)
+    binaryPath: z.string().max(4096),
+    cloudflareMode: z.enum(['quick', 'named']).optional().default('quick'),
+    cloudflarePublicUrl: z
+      .string()
+      .max(2048)
+      .refine(
+        (value) => value.trim() === '' || normalizeCloudflarePublicOrigin(value) !== null,
+        'Expected an HTTPS Cloudflare origin such as https://mcp.example.com'
+      )
+      .transform((value) => normalizeCloudflarePublicOrigin(value) ?? ''),
+    cloudflareLocalPort: z
+      .number()
+      .int()
+      .min(1)
+      .max(65_535)
+      .optional()
+      .default(DEFAULT_CLOUDFLARE_LOCAL_PORT)
   }),
   ui: z.object({
     minimizeToTray: z.boolean(),
@@ -197,7 +217,22 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
         base.tunnel.desktopTunnelId,
         wanted.tunnel.desktopTunnelId
       ),
-      binaryPath: pick(current.tunnel.binaryPath, base.tunnel.binaryPath, wanted.tunnel.binaryPath)
+      binaryPath: pick(current.tunnel.binaryPath, base.tunnel.binaryPath, wanted.tunnel.binaryPath),
+      cloudflareMode: pick(
+        current.tunnel.cloudflareMode ?? 'quick',
+        base.tunnel.cloudflareMode ?? 'quick',
+        wanted.tunnel.cloudflareMode ?? 'quick'
+      ),
+      cloudflarePublicUrl: pick(
+        current.tunnel.cloudflarePublicUrl ?? '',
+        base.tunnel.cloudflarePublicUrl ?? '',
+        wanted.tunnel.cloudflarePublicUrl ?? ''
+      ),
+      cloudflareLocalPort: pick(
+        current.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT,
+        base.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT,
+        wanted.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT
+      )
     },
     ui: {
       minimizeToTray: pick(current.ui.minimizeToTray, base.ui.minimizeToTray, wanted.ui.minimizeToTray),
@@ -280,6 +315,7 @@ async function buildState(): Promise<AppState> {
     secureStorage: await secureStorageStatus(),
     hasApiKey: await hasSecret('openaiApiKey'),
     hasGoalKey: await hasSecret('openRouterApiKey'),
+    hasCloudflareToken: await hasSecret('cloudflareTunnelToken'),
     resolvedBinary: resolvedBinary(config),
     bundledTunnelVersion: bundledVersion(),
     bridge: await bridgeStatus(),
@@ -467,14 +503,22 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
    */
   handle('secret:set', async (payload) => {
     const { value, key } = z
-      .object({ value: z.string().max(500), key: z.enum(['openaiApiKey', 'openRouterApiKey']).default('openaiApiKey') })
+      .object({
+        value: z.string().max(500),
+        key: z.enum(['openaiApiKey', 'openRouterApiKey', 'cloudflareTunnelToken']).default('openaiApiKey')
+      })
       .parse(payload);
     if (!(await isEncryptionAvailable())) {
       throw new Error('Secure OS credential storage is unavailable, so the key cannot be stored safely.');
     }
     await setSecret(key, value);
     if (key === 'openRouterApiKey') retireGoalDrafts();
-    const what = key === 'openRouterApiKey' ? 'openrouter key' : 'api key';
+    const what =
+      key === 'openRouterApiKey'
+        ? 'openrouter key'
+        : key === 'cloudflareTunnelToken'
+          ? 'cloudflare tunnel token'
+          : 'api key';
     logInfo(value.trim() === '' ? `${what} cleared` : `${what} stored`);
     return buildState();
   });

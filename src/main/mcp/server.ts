@@ -21,7 +21,12 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { requestIdFromHeader, withInboundRequestId } from './inbound.js';
 import http from 'node:http';
 import { createMcpHandler } from '@modelcontextprotocol/server';
-import { localhostHostValidation, localhostOriginValidation, toNodeHandler } from '@modelcontextprotocol/node';
+import {
+  hostHeaderValidation,
+  localhostHostValidation,
+  localhostOriginValidation,
+  toNodeHandler
+} from '@modelcontextprotocol/node';
 import { getConfig } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 import { buildServer, resetToolClock, type ToolContext } from './tools.js';
@@ -255,7 +260,10 @@ export function forgetExposedSurface(): void {
   surfaceExposure.clear();
 }
 
-export async function startMcpServer(getContext: () => ToolContext): Promise<McpEndpoint> {
+export async function startMcpServer(
+  getContext: () => ToolContext,
+  options: { port?: number; publicHostname?: string } = {}
+): Promise<McpEndpoint> {
   // A per-session token in the path is what authorises callers. It is regenerated on
   // every app start, so a URL that leaks stops working when the app restarts.
   requestSeenAt = null;
@@ -322,7 +330,9 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
       { onerror: (error) => logError(`MCP handler error (${surface.id}): ${error.message}`) }
     )
   }));
-  const checkHost = localhostHostValidation();
+  const checkHost = options.publicHostname
+    ? hostHeaderValidation(['localhost', '127.0.0.1', '[::1]', options.publicHostname])
+    : localhostHostValidation();
   const checkOrigin = localhostOriginValidation();
 
   const server = http.createServer((req, res) => {
@@ -423,7 +433,7 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(options.port ?? 0, '127.0.0.1', () => {
       server.removeListener('error', reject);
       resolve();
     });

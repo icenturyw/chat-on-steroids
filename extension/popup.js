@@ -374,7 +374,7 @@ async function copyInto(button, text) {
     button.textContent = 'copy failed';
   }
   setTimeout(() => {
-    if (button.textContent === 'copied' || button.textContent === 'copy failed') button.textContent = was;
+    if (button.textContent !== was) button.textContent = was;
   }, 900);
 }
 

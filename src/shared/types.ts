@@ -113,6 +113,12 @@ export interface TunnelSettings {
   desktopTunnelId: string;
   /** Optional explicit path to tunnel-client / cloudflared. */
   binaryPath: string;
+  /** Cloudflare's ephemeral quick tunnel or an existing remotely-managed named tunnel. */
+  cloudflareMode?: 'quick' | 'named';
+  /** HTTPS origin already routed to the named tunnel, without the per-session MCP path. */
+  cloudflarePublicUrl?: string;
+  /** Origin port configured on the existing named tunnel. Ignored by quick tunnels. */
+  cloudflareLocalPort?: number;
 }
 
 export interface UiPrefs {
@@ -489,6 +495,8 @@ export interface AppState {
   hasApiKey: boolean;
   /** True when an OpenRouter key is stored, which is what the goal loop spends. Same rule: the key stays here. */
   hasGoalKey: boolean;
+  /** True when a Cloudflare named-tunnel token is stored. The token itself never leaves the main process. */
+  hasCloudflareToken?: boolean;
   /** Resolved path of the tunnel binary we would run, or null if we cannot find one. */
   resolvedBinary: string | null;
   /** Version of the tunnel-client copy shipped inside the app, for diagnostics. */

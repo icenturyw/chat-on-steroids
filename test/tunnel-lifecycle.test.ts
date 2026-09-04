@@ -224,3 +224,43 @@ describe('OpenAI tunnel process ownership', () => {
     await handle.stop();
   });
 });
+
+describe('Cloudflare named tunnel', () => {
+  it('keeps the token out of argv and publishes the fixed origin with the secret MCP path', async () => {
+    const reports: any[] = [];
+    const handle = await startTunnel({
+      localUrl: 'http://127.0.0.1:28766/mcp/core/session-secret',
+      settings: {
+        kind: 'cloudflared',
+        tunnelId: '',
+        desktopTunnelId: '',
+        binaryPath: '',
+        cloudflareMode: 'named',
+        cloudflarePublicUrl: 'https://mcp.example.com',
+        cloudflareLocalPort: 28766
+      },
+      apiKey: null,
+      cloudflareToken: 'named-token-secret',
+      report: (report) => reports.push(report)
+    });
+
+    expect(fixture.spawn).toHaveBeenCalledWith(
+      'tunnel-client-test',
+      ['tunnel', '--no-autoupdate', 'run'],
+      expect.objectContaining({ env: { TUNNEL_TOKEN: 'named-token-secret' } })
+    );
+    const argv = (fixture.spawn.mock.calls as unknown[][])[0]?.[1];
+    expect(JSON.stringify(argv)).not.toContain('named-token-secret');
+
+    fixture.children[0].stderr.emit(
+      'data',
+      Buffer.from('INF Registered tunnel connection connIndex=0\n')
+    );
+    expect(reports.at(-1)).toMatchObject({
+      state: 'connected',
+      publicUrl: 'https://mcp.example.com/mcp/core/session-secret'
+    });
+
+    await handle.stop();
+  });
+});

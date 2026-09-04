@@ -9,6 +9,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { DEFAULT_CLOUDFLARE_LOCAL_PORT } from '../shared/cloudflare.js';
 import {
   CAPABILITIES,
   DEFAULT_CAPABILITIES,
@@ -248,7 +249,16 @@ const configSchema = z.object({
     // loads unchanged and simply has no Desktop tunnel yet — which is also the correct
     // state for it, since the user has not created that connector in ChatGPT either.
     desktopTunnelId: z.string().max(128).optional().default(''),
-    binaryPath: z.string().max(4096)
+    binaryPath: z.string().max(4096),
+    cloudflareMode: z.enum(['quick', 'named']).optional().default('quick'),
+    cloudflarePublicUrl: z.string().max(2048).optional().default(''),
+    cloudflareLocalPort: z
+      .number()
+      .int()
+      .min(1)
+      .max(65_535)
+      .optional()
+      .default(DEFAULT_CLOUDFLARE_LOCAL_PORT)
   }),
   ui: z.object({
     minimizeToTray: z.boolean(),
@@ -381,7 +391,15 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
     roots: [],
     capabilities: firstLaunchCapabilities(platform, release),
     readOnly: false,
-    tunnel: { kind: 'openai', tunnelId: '', desktopTunnelId: '', binaryPath: '' },
+    tunnel: {
+      kind: 'openai',
+      tunnelId: '',
+      desktopTunnelId: '',
+      binaryPath: '',
+      cloudflareMode: 'quick',
+      cloudflarePublicUrl: '',
+      cloudflareLocalPort: DEFAULT_CLOUDFLARE_LOCAL_PORT
+    },
     ui: { minimizeToTray: true, autoConnect: false, privacyScreenshots: false, theme: 'dark' },
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },

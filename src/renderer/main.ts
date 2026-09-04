@@ -14,6 +14,7 @@
 
 import type { AppApi, SettingsPatch } from '../preload/index.js';
 import { requiresApprovedFilesystemRoot } from '../shared/capabilities.js';
+import { DEFAULT_CLOUDFLARE_LOCAL_PORT } from '../shared/cloudflare.js';
 import type { AppState, Capability, LogEntry, SurfaceStatus } from '../shared/types.js';
 import {
   browserExtensionRequired,
@@ -28,6 +29,7 @@ import {
 import type { SwarmState } from '../shared/session.js';
 import { $, ago, el, icon, run, shortAgo, toast } from './dom.js';
 import { chatApply, chatSettingsPatch, chatVisible, initChat } from './chat.js';
+import { installUiLocale } from './i18n.js';
 
 declare global {
   interface Window {
@@ -36,6 +38,8 @@ declare global {
 }
 
 const api = window.api;
+
+installUiLocale();
 
 /** Same shape the platform uses; mirrored here only to grey out step 2 until it is valid. */
 const TUNNEL_ID_PATTERN = /^tunnel_[0-9a-f]{32}$/;
@@ -400,7 +404,10 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark' } = {}): Prom
       kind: $<HTMLSelectElement>('tunnelKind').value as 'openai' | 'cloudflared' | 'manual',
       tunnelId: $<HTMLInputElement>('tunnelId').value.trim(),
       desktopTunnelId: $<HTMLInputElement>('desktopTunnelId').value.trim(),
-      binaryPath: $<HTMLInputElement>('binaryPath').value.trim()
+      binaryPath: $<HTMLInputElement>('binaryPath').value.trim(),
+      cloudflareMode: $<HTMLSelectElement>('cloudflareMode').value as 'quick' | 'named',
+      cloudflarePublicUrl: $<HTMLInputElement>('cloudflarePublicUrl').value.trim(),
+      cloudflareLocalPort: Number($<HTMLInputElement>('cloudflareLocalPort').value)
     },
     ui: {
       autoConnect: $<HTMLInputElement>('autoConnect').checked,
@@ -472,10 +479,15 @@ const STATUS_TEXT: Record<AppState['status']['state'], string> = {
 const METHOD_HINT: Record<string, string> = {
   openai:
     'ChatGPT reaches this computer through an OpenAI tunnel. Nothing is exposed to the open internet.',
-  cloudflared:
-    'Creates a temporary public https address with Cloudflare. The address changes on every restart.',
   manual: 'This app only listens on localhost. You are responsible for exposing it.'
 };
+
+function methodHint(config: AppState['config']): string {
+  if (config.tunnel.kind !== 'cloudflared') return METHOD_HINT[config.tunnel.kind] ?? '';
+  return (config.tunnel.cloudflareMode ?? 'quick') === 'named'
+    ? 'Uses an existing Cloudflare named tunnel and fixed hostname. No new tunnel is created.'
+    : 'Creates a temporary public https address with Cloudflare. The address changes on every restart.';
+}
 
 function duration(seconds: number | null): string {
   if (seconds === null) return '—';
@@ -518,6 +530,16 @@ function missingStep(next: AppState): { step: string; text: string } | null {
     }
   } else if (!next.resolvedBinary && config.tunnel.kind === 'cloudflared') {
     return { step: 'connect', text: 'cloudflared was not found on this computer.' };
+  } else if (
+    config.tunnel.kind === 'cloudflared' &&
+    (config.tunnel.cloudflareMode ?? 'quick') === 'named'
+  ) {
+    if (!config.tunnel.cloudflarePublicUrl) {
+      return { step: 'connect', text: 'Add the existing Cloudflare public origin.' };
+    }
+    if (!next.hasCloudflareToken) {
+      return { step: 'connect', text: 'Add the existing Cloudflare tunnel token.' };
+    }
   }
   return null;
 }
@@ -862,7 +884,7 @@ function apply(next: AppState): void {
     config.tunnel.kind,
     previousState?.config.tunnel.kind
   );
-  $('methodHint').textContent = METHOD_HINT[config.tunnel.kind] ?? '';
+  $('methodHint').textContent = methodHint(config);
   applyValue($<HTMLInputElement>('tunnelId'), config.tunnel.tunnelId, previousState?.config.tunnel.tunnelId);
   applyValue(
     $<HTMLInputElement>('desktopTunnelId'),
@@ -870,6 +892,21 @@ function apply(next: AppState): void {
     previousState?.config.tunnel.desktopTunnelId
   );
   applyValue($<HTMLInputElement>('binaryPath'), config.tunnel.binaryPath, previousState?.config.tunnel.binaryPath);
+  applyValue(
+    $<HTMLSelectElement>('cloudflareMode'),
+    config.tunnel.cloudflareMode ?? 'quick',
+    previousState?.config.tunnel.cloudflareMode ?? 'quick'
+  );
+  applyValue(
+    $<HTMLInputElement>('cloudflarePublicUrl'),
+    config.tunnel.cloudflarePublicUrl ?? '',
+    previousState?.config.tunnel.cloudflarePublicUrl ?? ''
+  );
+  applyValue(
+    $<HTMLInputElement>('cloudflareLocalPort'),
+    String(config.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT),
+    String(previousState?.config.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT)
+  );
   applyChecked($<HTMLInputElement>('autoConnect'), config.ui.autoConnect, previousState?.config.ui.autoConnect);
   applyChecked(
     $<HTMLInputElement>('minimizeToTray'),
@@ -893,6 +930,8 @@ function apply(next: AppState): void {
   }
 
   const openai = config.tunnel.kind === 'openai';
+  const cloudflared = config.tunnel.kind === 'cloudflared';
+  const namedCloudflare = cloudflared && (config.tunnel.cloudflareMode ?? 'quick') === 'named';
   const browserRequired = browserExtensionRequired(config);
   step('tunnel').hidden = !openai;
   step('key').hidden = !openai;
@@ -901,6 +940,8 @@ function apply(next: AppState): void {
   // whole address, so both connectors already ride the one tunnel on their own paths.
   const desktopSurface = status.surfaces.find((surface) => surface.id === 'desktop');
   $('desktopTunnelField').hidden = !openai || !desktopSurface?.available;
+  $('cloudflareSettings').hidden = !cloudflared;
+  $('cloudflareNamedSettings').hidden = !namedCloudflare;
 
   $('wizFolders').textContent =
     config.roots.length === 0 ? 'None yet' : config.roots.map((r) => `/${r.name}`).join('  ');
@@ -915,6 +956,19 @@ function apply(next: AppState): void {
       : 'Stored with secure OS credential storage. It is never shown again and never leaves this app.';
   $('apiKeyState').classList.toggle('is-warn', !secureStorageAvailable);
   $<HTMLButtonElement>('removeApiKey').disabled = !next.hasApiKey || !secureStorageAvailable;
+  const cloudflareToken = $<HTMLInputElement>('cloudflareToken');
+  cloudflareToken.placeholder = next.hasCloudflareToken
+    ? '•••••••• stored'
+    : 'Paste the existing tunnel token';
+  cloudflareToken.disabled = !secureStorageAvailable;
+  $('cloudflareTokenState').textContent = !secureStorageAvailable
+    ? (next.secureStorage?.detail ?? 'Secure credential storage is unavailable.')
+    : next.hasCloudflareToken
+      ? 'The existing tunnel token is stored with secure OS credential storage.'
+      : 'Stored with secure OS credential storage. It is never shown again.';
+  $('cloudflareTokenState').classList.toggle('is-warn', !secureStorageAvailable);
+  $<HTMLButtonElement>('removeCloudflareToken').disabled =
+    !next.hasCloudflareToken || !secureStorageAvailable;
 
   const wizConnect = $<HTMLButtonElement>('wizConnect');
   wizConnect.textContent = running ? 'Disconnect' : 'Connect';
@@ -1548,13 +1602,36 @@ $('removeApiKey').addEventListener('click', async () => {
   }
 });
 
+$('cloudflareToken').addEventListener('blur', async () => {
+  const input = $<HTMLInputElement>('cloudflareToken');
+  const submitted = input.value;
+  if (submitted === '') return;
+  const next = await run(api.setCloudflareToken(submitted));
+  if (next) {
+    if (input.value === submitted) input.value = '';
+    apply(next);
+    toast('Cloudflare tunnel token stored');
+  }
+});
+
+$('removeCloudflareToken').addEventListener('click', async () => {
+  const next = await run(api.setCloudflareToken(''));
+  if (next) {
+    apply(next);
+    toast('Cloudflare tunnel token removed');
+  }
+});
+
 for (const id of [
   'autoConnect',
   'minimizeToTray',
   'privacyScreenshots',
   'tunnelKind',
   'tunnelId',
-  'desktopTunnelId'
+  'desktopTunnelId',
+  'cloudflareMode',
+  'cloudflarePublicUrl',
+  'cloudflareLocalPort'
 ]) {
   $(id).addEventListener('change', () => void save());
 }

@@ -20,7 +20,15 @@ const mocks = vi.hoisted(() => {
     roots: [{ name: 'workspace', path: 'C:\\workspace' }],
     readOnly: true,
     capabilities: caps,
-    tunnel: { kind: 'cloudflared', tunnelId: '', desktopTunnelId: '', binaryPath: '' },
+    tunnel: {
+      kind: 'cloudflared',
+      tunnelId: '',
+      desktopTunnelId: '',
+      binaryPath: '',
+      cloudflareMode: 'quick' as 'quick' | 'named',
+      cloudflarePublicUrl: '',
+      cloudflareLocalPort: 28_766
+    },
     ui: { privacyScreenshots: false },
     sessions: { record: false },
     multiAgent: { enabled: false }
@@ -32,13 +40,16 @@ const mocks = vi.hoisted(() => {
     starts: 0,
     prewarm: vi.fn(async () => undefined),
     endpointStop: vi.fn(async (_options?: { forceAfterMs?: number }) => undefined),
+    endpointOptions: null as null | { port?: number; publicHostname?: string },
     endpointStartGate: null as Promise<void> | null,
     endpointStartReached: vi.fn(),
     tunnelStartGate: null as Promise<void> | null,
     tunnelStartReached: vi.fn(),
     tunnelStop: vi.fn(async () => undefined),
+    tunnelOptions: null as null | Record<string, any>,
     secretGate: null as Promise<void> | null,
-    secretReached: vi.fn()
+    secretReached: vi.fn(),
+    secrets: {} as Record<string, string | null>
   };
 });
 
@@ -54,15 +65,17 @@ vi.mock('../src/main/logger.js', () => ({ logError: vi.fn(), logInfo: vi.fn() })
 vi.mock('../src/main/mcp/server.js', () => ({
   lastRequestAt: () => null,
   tunnelProbeHeaders: () => ({}),
-  startMcpServer: vi.fn(async () => {
+  startMcpServer: vi.fn(async (_getContext: unknown, options: { port?: number; publicHostname?: string } = {}) => {
     mocks.endpointStartReached();
+    mocks.endpointOptions = options;
     if (mocks.endpointStartGate) await mocks.endpointStartGate;
+    const port = options.port ?? 45_678;
     return {
-      port: 45678,
-      url: 'http://127.0.0.1:45678/mcp/core/core-token',
+      port,
+      url: `http://127.0.0.1:${port}/mcp/core/core-token`,
       urls: {
-        core: 'http://127.0.0.1:45678/mcp/core/core-token',
-        desktop: 'http://127.0.0.1:45678/mcp/desktop/desktop-token'
+        core: `http://127.0.0.1:${port}/mcp/core/core-token`,
+        desktop: `http://127.0.0.1:${port}/mcp/desktop/desktop-token`
       },
       stop: mocks.endpointStop
     };
@@ -71,15 +84,17 @@ vi.mock('../src/main/mcp/server.js', () => ({
 
 vi.mock('../src/main/mcp/tools.js', () => ({ lastToolCallAt: () => null }));
 vi.mock('../src/main/secrets.js', () => ({
-  getSecret: vi.fn(async () => {
+  getSecret: vi.fn(async (key: string) => {
     mocks.secretReached();
     if (mocks.secretGate) await mocks.secretGate;
-    return null;
+    return mocks.secrets[key] ?? null;
   })
 }));
 vi.mock('../src/main/tunnel/index.js', () => ({
-  startTunnel: vi.fn(async (options: { report: (report: Record<string, unknown>) => void }) => {
+  TunnelError: class TunnelError extends Error {},
+  startTunnel: vi.fn(async (options: { report: (report: Record<string, unknown>) => void } & Record<string, any>) => {
     mocks.starts += 1;
+    mocks.tunnelOptions = options;
     mocks.report = options.report;
     mocks.tunnelStartReached();
     if (mocks.tunnelStartGate) await mocks.tunnelStartGate;
@@ -99,12 +114,15 @@ describe('connection surface state', () => {
     mocks.prewarm.mockClear();
     mocks.endpointStop.mockClear();
     mocks.endpointStartReached.mockClear();
+    mocks.endpointOptions = null;
     mocks.endpointStartGate = null;
     mocks.tunnelStartReached.mockClear();
     mocks.tunnelStartGate = null;
     mocks.tunnelStop.mockClear();
+    mocks.tunnelOptions = null;
     mocks.secretReached.mockClear();
     mocks.secretGate = null;
+    mocks.secrets = {};
     Object.assign(mocks.caps, {
       browse: true,
       search: true,
@@ -125,7 +143,61 @@ describe('connection surface state', () => {
     mocks.config.tunnel.kind = 'cloudflared';
     mocks.config.tunnel.tunnelId = '';
     mocks.config.tunnel.binaryPath = '';
+    mocks.config.tunnel.cloudflareMode = 'quick';
+    mocks.config.tunnel.cloudflarePublicUrl = '';
+    mocks.config.tunnel.cloudflareLocalPort = 28_766;
     vi.resetModules();
+  });
+
+  it('binds a named Cloudflare tunnel to its configured localhost port and fixed hostname', async () => {
+    mocks.config.tunnel.cloudflareMode = 'named';
+    mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com/';
+    mocks.config.tunnel.cloudflareLocalPort = 28_766;
+    mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+
+    expect(mocks.endpointOptions).toEqual({ port: 28_766, publicHostname: 'mcp.example.com' });
+    expect(mocks.tunnelOptions).toMatchObject({
+      localUrl: 'http://127.0.0.1:28766/mcp/core/core-token',
+      apiKey: null,
+      cloudflareToken: 'named-token-secret'
+    });
+  });
+
+  it('refuses an invalid named Cloudflare origin before opening the local endpoint', async () => {
+    mocks.config.tunnel.cloudflareMode = 'named';
+    mocks.config.tunnel.cloudflarePublicUrl = 'http://mcp.example.com';
+    mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+
+    expect(mocks.endpointStartReached).not.toHaveBeenCalled();
+    expect(connection.getStatus()).toMatchObject({
+      state: 'tunnel-unavailable',
+      detail: 'Enter the existing Cloudflare HTTPS origin, for example https://mcp.example.com.'
+    });
+  });
+
+  it('reconnects when named Cloudflare routing changes but ignores a cosmetic trailing slash', async () => {
+    mocks.config.tunnel.cloudflareMode = 'named';
+    mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com';
+    mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+    expect(mocks.starts).toBe(1);
+
+    mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com/';
+    await connection.applySettings();
+    expect(mocks.starts).toBe(1);
+
+    mocks.config.tunnel.cloudflareLocalPort = 28_767;
+    await connection.applySettings();
+    expect(mocks.starts).toBe(2);
+    expect(mocks.endpointOptions).toEqual({ port: 28_767, publicHostname: 'mcp.example.com' });
   });
 
   it('drops the previous tunnel state and URL from connector cards after disconnect', async () => {
@@ -198,6 +270,7 @@ describe('connection surface state', () => {
   });
 
   it('tears down the local endpoint when Keychain lookup resumes after final shutdown', async () => {
+    mocks.config.tunnel.kind = 'openai';
     let releaseSecret!: () => void;
     mocks.secretGate = new Promise<void>((resolve) => {
       releaseSecret = resolve;

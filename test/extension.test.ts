@@ -53,7 +53,11 @@ describe('extension release metadata', () => {
   it('runs the fiber helper in the page context, and nothing else there', async () => {
     const manifest = JSON.parse(
       await fs.readFile(path.join(process.cwd(), 'extension', 'manifest.json'), 'utf8')
-    ) as { content_scripts: Array<{ js: string[]; world?: string }> };
+    ) as { default_locale?: string; name: string; description: string; content_scripts: Array<{ js: string[]; world?: string }> };
+
+    expect(manifest.default_locale).toBe('en');
+    expect(manifest.name).toBe('__MSG_extensionName__');
+    expect(manifest.description).toBe('__MSG_extensionDescription__');
 
     const main = manifest.content_scripts.filter((entry) => entry.world === 'MAIN');
     expect(main).toHaveLength(1);
@@ -1368,9 +1372,11 @@ describe('extension command delivery', () => {
       url: ['https://chatgpt.com/*', 'https://chat.openai.com/*']
     });
     expect(worker.scriptingExecuteScript.mock.calls).toEqual([
+      [{ target: { tabId: 41 }, files: ['locale.js'] }],
       [{ target: { tabId: 41 }, files: ['chatgpt-dom.js'] }],
       [{ target: { tabId: 41 }, world: 'MAIN', files: ['fiber.js'] }],
       [{ target: { tabId: 41 }, files: ['content.js'] }],
+      [{ target: { tabId: 42 }, files: ['locale.js'] }],
       [{ target: { tabId: 42 }, files: ['chatgpt-dom.js'] }],
       [{ target: { tabId: 42 }, world: 'MAIN', files: ['fiber.js'] }],
       [{ target: { tabId: 42 }, files: ['content.js'] }]

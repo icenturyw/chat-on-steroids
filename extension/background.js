@@ -2732,6 +2732,7 @@ async function restoreChatgptTab(id) {
   }
   try {
     // Rebuild the isolated-world DOM adapter before the recorder that consumes it.
+    await chrome.scripting.executeScript({ target: { tabId: id }, files: ['locale.js'] });
     await chrome.scripting.executeScript({ target: { tabId: id }, files: ['chatgpt-dom.js'] });
     // Keep the React/Fiber reader in ChatGPT's own world, exactly like the static manifest
     // declaration. An older helper may still answer too; the nonce/version gate in

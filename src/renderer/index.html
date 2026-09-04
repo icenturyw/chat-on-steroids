@@ -424,10 +424,60 @@
                 <label for="tunnelKind">Method</label>
                 <select id="tunnelKind">
                   <option value="openai">OpenAI Secure MCP Tunnel (recommended)</option>
-                  <option value="cloudflared">Cloudflare quick tunnel</option>
+                  <option value="cloudflared">Cloudflare tunnel</option>
                   <option value="manual">Local only — I run my own tunnel</option>
                 </select>
                 <p class="hint" id="methodHint"></p>
+              </div>
+
+              <div id="cloudflareSettings" hidden>
+                <div class="field">
+                  <label for="cloudflareMode">Cloudflare mode</label>
+                  <select id="cloudflareMode">
+                    <option value="quick">Quick tunnel — temporary address</option>
+                    <option value="named">Named tunnel — existing fixed address</option>
+                  </select>
+                </div>
+
+                <div id="cloudflareNamedSettings" hidden>
+                  <p class="hint">
+                    In Cloudflare, create a published application route for this hostname and set
+                    its Service to http://localhost:&lt;the port below&gt;. Get the tunnel token from Add
+                    a replica and paste it here.
+                  </p>
+
+                  <div class="field">
+                    <label for="cloudflarePublicUrl">Existing public origin</label>
+                    <input
+                      id="cloudflarePublicUrl"
+                      type="url"
+                      spellcheck="false"
+                      placeholder="https://mcp.example.com"
+                    />
+                    <p class="hint">Use the hostname already routed to this Cloudflare tunnel. The app adds its secret MCP path.</p>
+                  </div>
+
+                  <div class="field">
+                    <label for="cloudflareLocalPort">Configured origin port</label>
+                    <input id="cloudflareLocalPort" type="number" min="1" max="65535" value="28766" />
+                    <p class="hint">This must match the localhost port configured for the existing tunnel.</p>
+                  </div>
+
+                  <div class="field">
+                    <label for="cloudflareToken">Tunnel token</label>
+                    <input
+                      id="cloudflareToken"
+                      type="password"
+                      spellcheck="false"
+                      placeholder="Paste the existing tunnel token"
+                      autocomplete="off"
+                    />
+                    <p class="hint" id="cloudflareTokenState"></p>
+                    <div class="step-actions">
+                      <button class="btn" id="removeCloudflareToken" type="button">Remove stored tunnel token</button>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div class="field">

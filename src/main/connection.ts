@@ -11,6 +11,10 @@
 
 import type { ConnectionStatus, SurfaceStatus, TunnelSettings } from '../shared/types.js';
 import { requiresApprovedFilesystemRoot } from '../shared/capabilities.js';
+import {
+  DEFAULT_CLOUDFLARE_LOCAL_PORT,
+  normalizeCloudflarePublicOrigin
+} from '../shared/cloudflare.js';
 import { prewarmComputerHelper } from './computer/index.js';
 import { effectiveCapabilities, getConfig } from './config.js';
 import { logError, logInfo, logWarn } from './logger.js';
@@ -29,7 +33,15 @@ let desktopTunnel: TunnelHandle | null = null;
 /** The tunnel id `desktopTunnel` was started for, so a changed id is detectable. */
 let desktopTunnelId: string | null = null;
 /** Core-affecting transport settings the current run actually started with. */
-let activeCoreTransport: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'> | null = null;
+type CoreTransport = {
+  kind: TunnelSettings['kind'];
+  tunnelId: string;
+  binaryPath: string;
+  cloudflareMode: 'quick' | 'named';
+  cloudflarePublicUrl: string;
+  cloudflareLocalPort: number;
+};
+let activeCoreTransport: CoreTransport | null = null;
 let status: ConnectionStatus = {
   state: 'disconnected',
   detail: '',
@@ -178,19 +190,34 @@ function surfaceStateForConnection(state: ConnectionStatus['state']): SurfaceSta
  * Irrelevant fields are normalised out too, so editing a hidden OpenAI id while Cloudflare is
  * active does not bounce a perfectly good connection.
  */
-function coreTransport(settings: TunnelSettings): Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'> {
+function coreTransport(settings: TunnelSettings): CoreTransport {
+  const cloudflareMode = settings.kind === 'cloudflared' ? (settings.cloudflareMode ?? 'quick') : 'quick';
+  const cloudflarePublicUrl =
+    settings.kind === 'cloudflared' && cloudflareMode === 'named'
+      ? (normalizeCloudflarePublicOrigin(settings.cloudflarePublicUrl ?? '') ?? settings.cloudflarePublicUrl ?? '')
+      : '';
   return {
     kind: settings.kind,
     tunnelId: settings.kind === 'openai' ? settings.tunnelId : '',
-    binaryPath: settings.kind === 'manual' ? '' : settings.binaryPath
+    binaryPath: settings.kind === 'manual' ? '' : settings.binaryPath,
+    cloudflareMode,
+    cloudflarePublicUrl,
+    cloudflareLocalPort:
+      settings.kind === 'cloudflared' && cloudflareMode === 'named'
+        ? (settings.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT)
+        : 0
   };
 }
 
-function sameCoreTransport(
-  left: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'>,
-  right: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'>
-): boolean {
-  return left.kind === right.kind && left.tunnelId === right.tunnelId && left.binaryPath === right.binaryPath;
+function sameCoreTransport(left: CoreTransport, right: CoreTransport): boolean {
+  return (
+    left.kind === right.kind &&
+    left.tunnelId === right.tunnelId &&
+    left.binaryPath === right.binaryPath &&
+    left.cloudflareMode === right.cloudflareMode &&
+    left.cloudflarePublicUrl === right.cloudflarePublicUrl &&
+    left.cloudflareLocalPort === right.cloudflareLocalPort
+  );
 }
 
 /**
@@ -242,15 +269,34 @@ async function connectImpl(): Promise<void> {
 
   try {
     setStatus({ state: 'starting-server', detail: 'Starting the local server…', publicUrl: null });
-    const startedEndpoint = await startMcpServer(() => {
-      const live = getConfig();
-      return {
-        roots: live.roots,
-        caps: effectiveCapabilities(live),
-        readOnly: live.readOnly,
-        privacyScreenshots: live.ui.privacyScreenshots
-      };
-    });
+    const namedCloudflare =
+      config.tunnel.kind === 'cloudflared' && (config.tunnel.cloudflareMode ?? 'quick') === 'named';
+    const namedOrigin = namedCloudflare
+      ? normalizeCloudflarePublicOrigin(config.tunnel.cloudflarePublicUrl ?? '')
+      : null;
+    if (namedCloudflare && !namedOrigin) {
+      throw new TunnelError(
+        'Enter the existing Cloudflare HTTPS origin, for example https://mcp.example.com.'
+      );
+    }
+    const namedHostname = namedOrigin ? new URL(namedOrigin).hostname : null;
+    const startedEndpoint = await startMcpServer(
+      () => {
+        const live = getConfig();
+        return {
+          roots: live.roots,
+          caps: effectiveCapabilities(live),
+          readOnly: live.readOnly,
+          privacyScreenshots: live.ui.privacyScreenshots
+        };
+      },
+      namedCloudflare
+        ? {
+            port: config.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT,
+            publicHostname: namedHostname!
+          }
+        : {}
+    );
     if (shutdownRequested || generation !== connectionGeneration) {
       await startedEndpoint.stop({ forceAfterMs: 30_000 }).catch(() => {});
       return;
@@ -260,7 +306,8 @@ async function connectImpl(): Promise<void> {
     if (desktopAutomationSupported() && (caps.screen || caps.control)) void prewarmComputerHelper();
     updateSurface('core', { state: 'starting', detail: 'Connecting…' });
 
-    const apiKey = await getSecret('openaiApiKey');
+    const apiKey = config.tunnel.kind === 'openai' ? await getSecret('openaiApiKey') : null;
+    const cloudflareToken = namedCloudflare ? await getSecret('cloudflareTunnelToken') : null;
     if (shutdownRequested || generation !== connectionGeneration) {
       await disconnectImpl(30_000);
       return;
@@ -270,6 +317,7 @@ async function connectImpl(): Promise<void> {
       localUrl: endpoint.url,
       settings: config.tunnel,
       apiKey,
+      cloudflareToken,
       discoveryHeaders: tunnelProbeHeaders(),
       label: 'core',
       report: (report) => {

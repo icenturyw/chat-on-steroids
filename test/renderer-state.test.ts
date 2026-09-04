@@ -3,6 +3,35 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
+import { isSimplifiedChineseLocale, translateUiText } from '../src/renderer/i18n.js';
+
+it('selects Simplified Chinese without changing Traditional Chinese locales', () => {
+  expect(isSimplifiedChineseLocale('zh-CN')).toBe(true);
+  expect(isSimplifiedChineseLocale('zh-Hans-SG')).toBe(true);
+  expect(isSimplifiedChineseLocale('zh')).toBe(true);
+  expect(isSimplifiedChineseLocale('zh-TW')).toBe(false);
+  expect(isSimplifiedChineseLocale('zh-Hant-HK')).toBe(false);
+  expect(isSimplifiedChineseLocale('en-US')).toBe(false);
+});
+
+it('translates fixed and counted renderer chrome into Simplified Chinese', () => {
+  expect(translateUiText('Setup')).toBe('设置');
+  expect(translateUiText('no handshake yet')).toBe('尚未完成握手');
+  expect(translateUiText('4 permissions')).toBe('4 项权限');
+  expect(translateUiText('9 total · 1 folder')).toBe('共 9 个 · 1 个文件夹');
+  expect(translateUiText('4 messages · 11 tools')).toBe('4 条消息 · 11 次工具调用');
+  expect(translateUiText('3 retained sessions · one live now')).toBe('保留 3 个会话 · 当前 1 个活动');
+  expect(translateUiText('Connected. Listening on 127.0.0.1:8765 · last message just now.')).toBe(
+    '已连接。正在监听 127.0.0.1:8765 · 刚刚收到消息。'
+  );
+  expect(
+    translateUiText(
+      'Nothing shared yet. Press Add or drop a folder here. ChatGPT sees short names\n                  like'
+    )
+  ).toBe('尚未共享任何文件夹。点击“添加”或将文件夹拖到此处。ChatGPT 只会看到类似');
+  expect(translateUiText('Cloudflare mode')).toBe('Cloudflare 模式');
+  expect(translateUiText('user-authored text')).toBe('user-authored text');
+});
 
 let dom: JSDOM | null = null;
 afterEach(() => {

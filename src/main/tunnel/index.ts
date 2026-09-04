@@ -17,6 +17,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { ConnectionState, TunnelHealth, TunnelSettings } from '../../shared/types.js';
+import { normalizeCloudflarePublicOrigin } from '../../shared/cloudflare.js';
 import { childEnv, terminateProcessTree } from '../exec.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 import { ago, POLL_FRESH_MS, readClientStatus, readPollHealth } from './health.js';
@@ -37,6 +38,8 @@ export interface TunnelStartOptions {
   settings: TunnelSettings;
   /** OpenAI control-plane API key, only for the openai adapter. */
   apiKey: string | null;
+  /** Cloudflare tunnel token, only for the named cloudflared adapter. */
+  cloudflareToken?: string | null;
   /** Headers added only to tunnel-client's own MCP discovery/startup probes. */
   discoveryHeaders?: Record<string, string>;
   /**
@@ -653,17 +656,32 @@ async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle>
 
   const local = new URL(opts.localUrl);
   const origin = `${local.protocol}//${local.host}`;
+  const mode = opts.settings.cloudflareMode ?? 'quick';
+  let namedOrigin = '';
 
-  const args = [
-    'tunnel',
-    '--no-autoupdate',
-    '--url',
-    origin,
-    // Without this the origin would see the public trycloudflare hostname and our
-    // loopback Host check would reject the request.
-    '--http-host-header',
-    local.host
-  ];
+  if (mode === 'named') {
+    if (!opts.cloudflareToken) throw new TunnelError('Add the Cloudflare named-tunnel token first.');
+    namedOrigin = normalizeCloudflarePublicOrigin(opts.settings.cloudflarePublicUrl ?? '') ?? '';
+    if (!namedOrigin) {
+      throw new TunnelError('Enter the existing Cloudflare tunnel HTTPS origin, for example https://mcp.example.com.');
+    }
+  }
+
+  const args =
+    mode === 'named'
+      ? ['tunnel', '--no-autoupdate', 'run']
+      : [
+          'tunnel',
+          '--no-autoupdate',
+          '--url',
+          origin,
+          // Without this the origin would see the public trycloudflare hostname and our
+          // loopback Host check would reject the request.
+          '--http-host-header',
+          local.host
+        ];
+  const env = childEnv();
+  if (mode === 'named') env.TUNNEL_TOKEN = opts.cloudflareToken!;
 
   opts.report({ state: 'connecting-tunnel', detail: 'Starting cloudflared…' });
 
@@ -673,7 +691,7 @@ async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle>
     stdio: ['ignore', 'pipe', 'pipe'],
     // Tunnel providers need the ordinary OS environment, never credentials inherited
     // from a terminal that happened to launch Electron.
-    env: childEnv()
+    env
   });
 
   let settled = false;
@@ -681,6 +699,17 @@ async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle>
   let lastError = '';
 
   const handleLine = (line: string): void => {
+    if (mode === 'named' && /registered tunnel connection/i.test(line) && !settled) {
+      settled = true;
+      const publicUrl = `${namedOrigin}${local.pathname}`;
+      logInfo('named Cloudflare tunnel connected');
+      opts.report({
+        state: 'connected',
+        detail: 'Connected through the existing Cloudflare named tunnel.',
+        publicUrl
+      });
+      return;
+    }
     const match = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i.exec(line);
     if (match && !settled) {
       settled = true;
@@ -719,7 +748,11 @@ async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle>
     if (!settled && !stopped) {
       opts.report({
         state: 'tunnel-unavailable',
-        detail: lastError || 'cloudflared did not report a public URL within 45 seconds.'
+        detail:
+          lastError ||
+          (mode === 'named'
+            ? 'cloudflared did not register the named tunnel within 45 seconds.'
+            : 'cloudflared did not report a public URL within 45 seconds.')
       });
     }
   }, 45_000);

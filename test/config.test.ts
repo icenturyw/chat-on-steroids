@@ -24,6 +24,57 @@ afterAll(async () => {
 });
 
 describe('settings migration', () => {
+  it('ships this fork with the fixed Cloudflare named-tunnel endpoint', () => {
+    const config = defaultConfig();
+    expect(config.tunnel.cloudflareMode).toBe('named');
+    expect(config.tunnel.cloudflarePublicUrl).toBe('https://chat-on-steroids.icenturyw.com');
+    expect(config.tunnel.cloudflareLocalPort).toBe(28_767);
+  });
+
+  it('adopts the project Cloudflare endpoint for an untouched older named-tunnel config', async () => {
+    const config = defaultConfig();
+    await fs.writeFile(
+      path.join(dir, 'config.json'),
+      JSON.stringify({
+        ...config,
+        tunnel: {
+          ...config.tunnel,
+          kind: 'cloudflared',
+          cloudflareMode: 'named',
+          cloudflarePublicUrl: '',
+          cloudflareLocalPort: 28_766
+        }
+      }),
+      'utf8'
+    );
+
+    const loaded = await loadConfig();
+    expect(loaded.tunnel.cloudflarePublicUrl).toBe('https://chat-on-steroids.icenturyw.com');
+    expect(loaded.tunnel.cloudflareLocalPort).toBe(28_767);
+  });
+
+  it('preserves an explicitly configured Cloudflare hostname and port', async () => {
+    const config = defaultConfig();
+    await fs.writeFile(
+      path.join(dir, 'config.json'),
+      JSON.stringify({
+        ...config,
+        tunnel: {
+          ...config.tunnel,
+          kind: 'cloudflared',
+          cloudflareMode: 'named',
+          cloudflarePublicUrl: 'https://other.example.com',
+          cloudflareLocalPort: 30_001
+        }
+      }),
+      'utf8'
+    );
+
+    const loaded = await loadConfig();
+    expect(loaded.tunnel.cloudflarePublicUrl).toBe('https://other.example.com');
+    expect(loaded.tunnel.cloudflareLocalPort).toBe(30_001);
+  });
+
   it('never leaves Goal enabled while session recording is off', async () => {
     const impossible = {
       ...defaultConfig(),

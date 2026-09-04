@@ -117,7 +117,7 @@ export interface TunnelSettings {
   cloudflareMode?: 'quick' | 'named';
   /** HTTPS origin already routed to the named tunnel, without the per-session MCP path. */
   cloudflarePublicUrl?: string;
-  /** Origin port configured on the existing named tunnel. Ignored by quick tunnels. */
+  /** Stable loopback MCP port exposed by Cloudflare in both quick and named modes. */
   cloudflareLocalPort?: number;
 }
 

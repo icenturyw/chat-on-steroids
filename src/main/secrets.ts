@@ -61,7 +61,13 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
  * only credential in here that a *model* can cause to be spent, so it lives under the same
  * OS-backed encrypted blob as the rest and never leaves the main process.
  */
-export type SecretKey = 'openaiApiKey' | 'bridgeToken' | 'openRouterApiKey' | 'cloudflareTunnelToken';
+export type SecretKey =
+  | 'openaiApiKey'
+  | 'bridgeToken'
+  | 'openRouterApiKey'
+  | 'cloudflareTunnelToken'
+  | 'mcpCorePathToken'
+  | 'mcpDesktopPathToken';
 
 export function initSecretsPath(userDataDir: string): void {
   secretsPath = path.join(userDataDir, FILE_NAME);

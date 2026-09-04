@@ -1177,7 +1177,17 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const id = conversationId(body['conversationId']);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
     const calls = parseCallEvidence(body['calls'], true).filter((call) => call.requestId !== null);
-    if (calls.length === 0) return json(res, 400, { error: 'bad_request_evidence' }, origin);
+    const openaiSessions = [...new Set(
+      (Array.isArray(body['sessions']) ? body['sessions'] : [])
+        .map((entry) => {
+          if (!entry || typeof entry !== 'object') return null;
+          const value = (entry as Record<string, unknown>)['openaiSession'];
+          return typeof value === 'string' && value.length > 0 && value.length <= 512 ? value : null;
+        })
+        .filter((value): value is string => value !== null)
+    )];
+    if (calls.length === 0 && openaiSessions.length === 0) return json(res, 400, { error: 'bad_request_evidence' }, origin);
+    if (openaiSessions.length > 0) logInfo(`browser correlation supplied ${openaiSessions.length} OpenAI session key(s)`);
 
     // This is the live-turn ownership handshake, deliberately separate from transcript
     // delivery. A fresh ChatGPT conversation can expose metadata.request_id before its

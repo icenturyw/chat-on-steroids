@@ -9,6 +9,7 @@
  * desktop control should not see a broken app because of a connector they did not create.
  */
 
+import { randomBytes } from 'node:crypto';
 import type { ConnectionStatus, SurfaceStatus, TunnelSettings } from '../shared/types.js';
 import { requiresApprovedFilesystemRoot } from '../shared/capabilities.js';
 import {
@@ -20,8 +21,8 @@ import { effectiveCapabilities, getConfig } from './config.js';
 import { logError, logInfo, logWarn } from './logger.js';
 import { lastRequestAt, startMcpServer, tunnelProbeHeaders, type McpEndpoint } from './mcp/server.js';
 import { lastToolCallAt } from './mcp/tools.js';
-import { SURFACE_LIST, surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js';
-import { getSecret } from './secrets.js';
+import { SURFACE_IDS, SURFACE_LIST, surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js';
+import { getSecret, setSecret, type SecretKey } from './secrets.js';
 import { startTunnel, TunnelError, type TunnelHandle } from './tunnel/index.js';
 import { desktopAutomationSupported } from './platform.js';
 
@@ -32,6 +33,40 @@ let tunnel: TunnelHandle | null = null;
 let desktopTunnel: TunnelHandle | null = null;
 /** The tunnel id `desktopTunnel` was started for, so a changed id is detectable. */
 let desktopTunnelId: string | null = null;
+
+const MCP_PATH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const MCP_PATH_SECRET_KEYS: Record<SurfaceId, SecretKey> = {
+  core: 'mcpCorePathToken',
+  desktop: 'mcpDesktopPathToken'
+};
+
+/**
+ * Loads one stable path bearer token per connector surface.
+ *
+ * They live in the same OS-backed encrypted store as the tunnel token, not config.json. A
+ * missing/invalid token is replaced with 32 random bytes. If secure storage cannot persist the
+ * replacement, the fresh token is still safe for this run and will simply rotate next launch.
+ */
+async function persistentMcpPathTokens(): Promise<Record<SurfaceId, string>> {
+  const tokens = {} as Record<SurfaceId, string>;
+  for (const surface of SURFACE_IDS) {
+    const key = MCP_PATH_SECRET_KEYS[surface];
+    const stored = await getSecret(key);
+    if (stored && MCP_PATH_TOKEN_PATTERN.test(stored)) {
+      tokens[surface] = stored;
+      continue;
+    }
+
+    const generated = randomBytes(32).toString('base64url');
+    tokens[surface] = generated;
+    try {
+      await setSecret(key, generated);
+    } catch (err) {
+      logWarn(`Could not persist ${surface} MCP path token; it will rotate on restart: ${(err as Error).message}`);
+    }
+  }
+  return tokens;
+}
 /** Core-affecting transport settings the current run actually started with. */
 type CoreTransport = {
   kind: TunnelSettings['kind'];
@@ -203,7 +238,7 @@ function coreTransport(settings: TunnelSettings): CoreTransport {
     cloudflareMode,
     cloudflarePublicUrl,
     cloudflareLocalPort:
-      settings.kind === 'cloudflared' && cloudflareMode === 'named'
+      settings.kind === 'cloudflared'
         ? (settings.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT)
         : 0
   };
@@ -269,8 +304,8 @@ async function connectImpl(): Promise<void> {
 
   try {
     setStatus({ state: 'starting-server', detail: 'Starting the local server…', publicUrl: null });
-    const namedCloudflare =
-      config.tunnel.kind === 'cloudflared' && (config.tunnel.cloudflareMode ?? 'quick') === 'named';
+    const cloudflare = config.tunnel.kind === 'cloudflared';
+    const namedCloudflare = cloudflare && (config.tunnel.cloudflareMode ?? 'quick') === 'named';
     const namedOrigin = namedCloudflare
       ? normalizeCloudflarePublicOrigin(config.tunnel.cloudflarePublicUrl ?? '')
       : null;
@@ -280,23 +315,39 @@ async function connectImpl(): Promise<void> {
       );
     }
     const namedHostname = namedOrigin ? new URL(namedOrigin).hostname : null;
-    const startedEndpoint = await startMcpServer(
-      () => {
-        const live = getConfig();
-        return {
-          roots: live.roots,
-          caps: effectiveCapabilities(live),
-          readOnly: live.readOnly,
-          privacyScreenshots: live.ui.privacyScreenshots
-        };
-      },
-      namedCloudflare
-        ? {
-            port: config.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT,
-            publicHostname: namedHostname!
-          }
-        : {}
-    );
+    const cloudflarePort = config.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT;
+    const surfaceTokens = await persistentMcpPathTokens();
+    let startedEndpoint: McpEndpoint;
+    try {
+      startedEndpoint = await startMcpServer(
+        () => {
+          const live = getConfig();
+          return {
+            roots: live.roots,
+            caps: effectiveCapabilities(live),
+            readOnly: live.readOnly,
+            privacyScreenshots: live.ui.privacyScreenshots
+          };
+        },
+        cloudflare
+          ? {
+              port: cloudflarePort,
+              ...(namedHostname ? { publicHostname: namedHostname } : {}),
+              surfaceTokens
+            }
+          : { surfaceTokens }
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (cloudflare && code === 'EADDRINUSE') {
+        throw new TunnelError(
+          `Cloudflare local MCP port ${cloudflarePort} is already in use. Choose another Local MCP port${
+            namedCloudflare ? ' and update the Cloudflare published application Service to match' : ''
+          }.`
+        );
+      }
+      throw error;
+    }
     if (shutdownRequested || generation !== connectionGeneration) {
       await startedEndpoint.stop({ forceAfterMs: 30_000 }).catch(() => {});
       return;

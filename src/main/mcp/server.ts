@@ -18,7 +18,12 @@
  */
 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { requestIdFromHeader, withInboundRequestId } from './inbound.js';
+import {
+  openAiSessionFromHeader,
+  requestIdFromHeader,
+  withInboundOpenAiSession,
+  withInboundRequestId
+} from './inbound.js';
 import http from 'node:http';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import {
@@ -262,10 +267,17 @@ export function forgetExposedSurface(): void {
 
 export async function startMcpServer(
   getContext: () => ToolContext,
-  options: { port?: number; publicHostname?: string } = {}
+  options: {
+    port?: number;
+    publicHostname?: string;
+    /** Stable bearer tokens supplied by the connection layer when secure storage is available. */
+    surfaceTokens?: Partial<Record<SurfaceId, string>>;
+  } = {}
 ): Promise<McpEndpoint> {
-  // A per-session token in the path is what authorises callers. It is regenerated on
-  // every app start, so a URL that leaks stops working when the app restarts.
+  // A bearer token in the path is what authorises callers. The connection layer normally
+  // supplies one stable token per surface from OS secure storage so a named-tunnel URL remains
+  // usable across restarts. If secure storage is unavailable, fall back to a per-run random
+  // token rather than weakening the endpoint or refusing to start the whole app.
   requestSeenAt = null;
   surfaceRequestAt.clear();
   resetToolClock();
@@ -277,7 +289,7 @@ export async function startMcpServer(
   // Desktop" and "give me everything" the same act.
   const surfacePaths = SURFACE_IDS.map((id) => ({
     id,
-    basePath: `/mcp/${id}/${randomBytes(32).toString('base64url')}`
+    basePath: `/mcp/${id}/${options.surfaceTokens?.[id] ?? randomBytes(32).toString('base64url')}`
   }));
 
   // ChatGPT can keep a cached tools/list snapshot for the lifetime of a connector
@@ -406,9 +418,16 @@ export async function startMcpServer(
       return;
     }
 
-    // The tool dispatch reads this back to join the call to the page request that issued
-    // it; see inbound.ts for why it cannot be taken from the MCP call context.
+    // The tool dispatch reads these back from request-local storage. `x-request-id` is the
+    // legacy exact page join; modern ChatGPT also supplies an anonymized per-conversation
+    // OpenAI session key which remains usable when the request id is absent.
     const requestId = requestIdFromHeader(req.headers['x-request-id']);
+    const openAiSession = openAiSessionFromHeader(req.headers['x-openai-session']);
+    const handle = (body?: unknown): void => {
+      withInboundRequestId(requestId, () =>
+        withInboundOpenAiSession(openAiSession, () => void route.handler(req, res, body))
+      );
+    };
     if (req.method === 'POST' && declaredHeader === undefined) {
       void readBoundedJsonBody(req).then((parsed) => {
         if (parsed.error === 'payload_too_large') {
@@ -419,11 +438,11 @@ export async function startMcpServer(
           jsonError(res, 400, 'invalid_json');
           return;
         }
-        withInboundRequestId(requestId, () => void route.handler(req, res, parsed.body));
+        handle(parsed.body);
       });
       return;
     }
-    withInboundRequestId(requestId, () => void route.handler(req, res));
+    handle();
   });
 
   // Reject slow or oversized bodies rather than holding sockets open indefinitely.

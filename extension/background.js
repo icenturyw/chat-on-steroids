@@ -2068,10 +2068,11 @@ const HANDLERS = {
     await noteTabConversation(source, conversationId);
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     const calls = Array.isArray(message.calls) ? message.calls : [];
-    if (calls.length === 0) return { ok: false, error: 'bad_request_evidence' };
+    const sessions = Array.isArray(message.sessions) ? message.sessions : [];
+    if (calls.length === 0 && sessions.length === 0) return { ok: false, error: 'bad_request_evidence' };
     const result = await call('/correlations', {
       method: 'POST',
-      body: JSON.stringify({ conversationId, calls })
+      body: JSON.stringify({ conversationId, calls, sessions })
     });
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },

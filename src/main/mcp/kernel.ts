@@ -20,7 +20,11 @@
  */
 
 import { rawPromises as fs } from '../rawfs.js';
-import { inboundRequestId } from './inbound.js';
+import {
+  inboundOpenAiSession,
+  inboundRequestId,
+  openAiConversationKey
+} from './inbound.js';
 import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { Capabilities, Root } from '../../shared/types.js';
@@ -76,7 +80,8 @@ import {
   evidenceWindow,
   freshCallOrigin,
   recordAgentMessage,
-  recordToolCall
+  recordToolCall,
+  sessionIdForConversation
 } from '../session/recorder.js';
 import { requestCorrelation } from '../session/correlation.js';
 import { BLOCKED_CHAT_REFUSAL, anyChatBlocked, isChatBlocked } from '../session/blocked-chats.js';
@@ -239,12 +244,11 @@ function noteOutcomeSafely(outcome: ToolOutcome): void {
 /**
  * The conversation this call was made from, if this call itself proved it.
  *
- * The only identity any agent has, and the reason no tool here carries a key. It reads one
- * thing: ChatGPT's own message model naming *this* tool request, in exactly one conversation,
- * at or after the moment this call started. Not `provenConversation()` — that reports whichever
- * chat has drawn connector rows lately and keeps answering for a minute after that chat went
- * quiet, which on a machine with one busy chat says the same thing whoever is calling. Not the
- * active chat, not the last chat, not a guess.
+ * There are now two exact identities, strongest browser-addressable one first:
+ *   - the legacy request-id join, which resolves to ChatGPT's concrete /c/<id> route; and
+ *   - OpenAI's anonymized per-conversation MCP session, which is available even when the chat
+ *     is on another device and no local browser can report page evidence.
+ * Neither uses the active tab, timing, tool names or any model-supplied argument.
  *
  * Deliberately non-blocking, and deliberately after the handler has run. Non-blocking because
  * this is on the path of every ordinary read and exec, and waiting on the browser to answer a
@@ -258,19 +262,55 @@ function noteOutcomeSafely(outcome: ToolOutcome): void {
  * inbox, and control of the run: `agents` establishes identity for itself, and refuses without
  * it by name.
  */
-function callerConversation(tool: string, startedAt: number, requestId: string | null): string | null {
-  return freshCallOrigin(tool, startedAt, requestId);
+function callerConversation(
+  tool: string,
+  startedAt: number,
+  requestId: string | null,
+  transportConversation: string | null
+): string | null {
+  return freshCallOrigin(tool, startedAt, requestId) ?? transportConversation;
 }
 
 /** Publishes both halves of one exact request proof into the call context. */
 function setCallerConversation(context: CallContext, conversationId: string | null): void {
   context.caller.conversationId = conversationId;
   const exact = conversationId ? requestCorrelation(context.caller.requestId) : null;
-  context.caller.sessionId = exact?.conversationId === conversationId ? exact.sessionId : null;
+  context.caller.sessionId =
+    exact?.conversationId === conversationId
+      ? exact.sessionId
+      : conversationId
+        ? sessionIdForConversation(conversationId)
+        : null;
 }
 
-/** The only SDK handler context field this layer consumes; request identity comes from ingress ALS. */
-type McpCallContext = Pick<ServerContext, 'sessionId'>;
+/** SDK request context fields used for transport identity. */
+type McpCallContext = Pick<ServerContext, 'sessionId' | 'mcpReq'>;
+
+/**
+ * OpenAI's anonymized conversation session for this tool call.
+ *
+ * `_meta["openai/session"]` is the protocol-level source. The raw HTTP header is retained as
+ * a compatibility fallback because live ChatGPT currently projects the same value there even
+ * when an SDK/runtime revision does not surface request metadata to the tool callback. If both
+ * are present but disagree, identity is ambiguous and therefore discarded.
+ */
+function openAiSessionOf(mcpCtx: McpCallContext | undefined): string | null {
+  const meta = mcpCtx?.mcpReq?._meta as Record<string, unknown> | undefined;
+  const fromMeta = typeof meta?.['openai/session'] === 'string' ? meta['openai/session'] : null;
+  const cleanMeta =
+    typeof fromMeta === 'string' && fromMeta.length > 0 && fromMeta.length <= 512 ? fromMeta : null;
+  const fromHeader = inboundOpenAiSession();
+  if (cleanMeta && fromHeader && cleanMeta !== fromHeader) return null;
+  return cleanMeta ?? fromHeader;
+}
+
+/**
+ * Exact per-conversation identity available directly on modern ChatGPT MCP calls.
+ * The returned value is a one-way digest; the upstream opaque session never leaves ingress.
+ */
+function transportConversationOf(mcpCtx: McpCallContext | undefined): string | null {
+  return openAiConversationKey(openAiSessionOf(mcpCtx));
+}
 
 /**
  * ChatGPT's id for this request, from `x-request-id`, without the per-attempt suffix.
@@ -294,12 +334,11 @@ function requestIdOf(mcpCtx: McpCallContext | undefined): string | null {
 }
 
 /**
- * Whether the MCP transport ever gave us a session id, once a real call has arrived.
+ * Whether the MCP transport ever gave us a stable caller identity, once a real call arrived.
  *
  * Recorded rather than assumed, because it is the one thing that would let this app know
- * which conversation is calling without asking the browser at all. Until it does, identity
- * comes from page evidence. This is what the Activity log reports on the first tool call of
- * each run.
+ * which conversation is calling without asking the browser at all. This is what the Activity
+ * log reports on the first tool call of each run.
  */
 let transportIdentity: { checked: boolean; present: boolean } = { checked: false, present: false };
 
@@ -312,8 +351,8 @@ function noteTransportIdentity(transportKey: string | null): void {
   transportIdentity = { checked: true, present: transportKey !== null };
   logInfo(
     transportKey
-      ? 'MCP transport supplied a session id — agent identity could be bound to the transport'
-      : 'MCP transport supplied no session id (stateless connector) — agent identity comes from page evidence'
+      ? 'MCP transport supplied stable caller identity'
+      : 'MCP transport supplied no stable caller identity — falling back to page request evidence'
   );
 }
 
@@ -426,6 +465,7 @@ async function dispatch(
   name: string,
   args: unknown,
   transportKey: string | null,
+  transportConversation: string | null,
   requestId: string | null,
   surface: SurfaceId,
   run: () => Promise<ToolResult>
@@ -445,7 +485,9 @@ async function dispatch(
     evidence: emptyEvidence()
   };
   return trackMcpRequest(() =>
-    trackInFlight(context, () => dispatchTracked(context, name, args, transportKey, requestId, surface, run))
+    trackInFlight(context, () =>
+      dispatchTracked(context, name, args, transportKey, transportConversation, requestId, surface, run)
+    )
   );
 }
 
@@ -468,6 +510,7 @@ async function dispatchTracked(
   name: string,
   args: unknown,
   transportKey: string | null,
+  transportConversation: string | null,
   requestId: string | null,
   surface: SurfaceId,
   run: () => Promise<ToolResult>
@@ -483,7 +526,7 @@ async function dispatchTracked(
   // request id, identity-sensitive handlers (workspace/session/agents) see it before they
   // touch state. If the page is one tick late this stays null; only handlers that actually
   // require identity wait for their own exact mate. Ordinary absolute reads/execs never wait.
-  setCallerConversation(context, callerConversation(name, startedAt, requestId));
+  setCallerConversation(context, callerConversation(name, startedAt, requestId, transportConversation));
   // Only calls that need an *existing* per-chat workspace before the handler runs are
   // identity-sensitive here. An absolute read or an exec with an explicit absolute workdir is
   // self-contained and must stay fast; if its exact page mate is late, workspace.ts simply
@@ -681,7 +724,7 @@ async function dispatchTracked(
   // already established its own inside the call and adopted it, and re-reading here would
   // only be able to disagree with the stronger answer it waited for.
   if (!context.caller.conversationId) {
-    const resolved = callerConversation(name, startedAt, requestId);
+    const resolved = callerConversation(name, startedAt, requestId, transportConversation);
     if (resolved) setCallerConversation(context, resolved);
   }
   // Never erase an identity a handler proved more strongly (agents::callerNow). The old
@@ -743,12 +786,16 @@ async function dispatchTracked(
     requestId: context.caller.requestId,
     conversationId: context.caller.conversationId,
     sessionId: context.caller.sessionId ?? null,
+    attribution:
+      context.caller.conversationId && context.caller.conversationId === transportConversation
+        ? 'openai_session'
+        : 'request_id',
     endsActivity: isFinish && !result.isError
   });
-  // Exact request-id identity needs no browser wait, so make its durable session append part
-  // of completing the MCP call. The recorder catches storage failures and returns null, so a
-  // broken history never breaks the tool itself. Only the degraded/unidentified path remains
-  // fire-and-forget because it may still spend a grace window waiting for page evidence.
+  // Exact request-id or OpenAI-session identity needs no browser wait, so make its durable
+  // session append part of completing the MCP call. The recorder catches storage failures and
+  // returns null, so a broken history never breaks the tool itself. Only the unidentified path
+  // remains fire-and-forget because it may still spend a grace window waiting for page evidence.
   if (context.caller.conversationId) {
     await recording;
     if (name === 'observe' || name === 'computer') {
@@ -982,13 +1029,22 @@ export function createRegistrar(server: McpServer, ctx: ToolContext, surface: Su
     registered: () => [...names],
     register(name, config, handler) {
       names.push(name);
-      // No identity field is ever added here. Every tool's schema is exactly what its
-      // surface declared: who is calling is a fact about the conversation, established from
-      // page evidence in `dispatch`, and never something the model is asked to carry.
-      server.registerTool(name, config, ((args: never, mcpCtx?: McpCallContext) =>
-        dispatch(name, args, mcpCtx?.sessionId ?? null, requestIdOf(mcpCtx), surface, () =>
-          handler(args)
-        )) as never);
+      // No identity field is ever added to a tool schema. Caller identity comes from transport
+      // metadata (`openai/session`) or the legacy request-id/page join, never from an argument
+      // the model is asked to echo back.
+      server.registerTool(name, config, ((args: never, mcpCtx?: McpCallContext) => {
+        const transportConversation = transportConversationOf(mcpCtx);
+        const transportKey = transportConversation ?? mcpCtx?.sessionId ?? null;
+        return dispatch(
+          name,
+          args,
+          transportKey,
+          transportConversation,
+          requestIdOf(mcpCtx),
+          surface,
+          () => handler(args)
+        );
+      }) as never);
     },
     guarded(cap, name, fn) {
       return guard(name, async () => {

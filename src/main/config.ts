@@ -9,7 +9,11 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { DEFAULT_CLOUDFLARE_LOCAL_PORT } from '../shared/cloudflare.js';
+import {
+  DEFAULT_CLOUDFLARE_LOCAL_PORT,
+  DEFAULT_CLOUDFLARE_MODE,
+  DEFAULT_CLOUDFLARE_PUBLIC_ORIGIN
+} from '../shared/cloudflare.js';
 import {
   CAPABILITIES,
   DEFAULT_CAPABILITIES,
@@ -250,8 +254,8 @@ const configSchema = z.object({
     // state for it, since the user has not created that connector in ChatGPT either.
     desktopTunnelId: z.string().max(128).optional().default(''),
     binaryPath: z.string().max(4096),
-    cloudflareMode: z.enum(['quick', 'named']).optional().default('quick'),
-    cloudflarePublicUrl: z.string().max(2048).optional().default(''),
+    cloudflareMode: z.enum(['quick', 'named']).optional().default(DEFAULT_CLOUDFLARE_MODE),
+    cloudflarePublicUrl: z.string().max(2048).optional().default(DEFAULT_CLOUDFLARE_PUBLIC_ORIGIN),
     cloudflareLocalPort: z
       .number()
       .int()
@@ -396,8 +400,8 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
       tunnelId: '',
       desktopTunnelId: '',
       binaryPath: '',
-      cloudflareMode: 'quick',
-      cloudflarePublicUrl: '',
+      cloudflareMode: DEFAULT_CLOUDFLARE_MODE,
+      cloudflarePublicUrl: DEFAULT_CLOUDFLARE_PUBLIC_ORIGIN,
       cloudflareLocalPort: DEFAULT_CLOUDFLARE_LOCAL_PORT
     },
     ui: { minimizeToTray: true, autoConnect: false, privacyScreenshots: false, theme: 'dark' },
@@ -484,7 +488,9 @@ export async function loadConfig(): Promise<Config> {
       current = conservativeRecoveryConfig();
     } else {
       current = enforceFeatureDependencies(
-        adoptCurrentGoalPrompt(adoptWiderWindow(adoptAutoCompaction(recalibrateTokens(parsed.data))))
+        adoptProjectCloudflareTunnel(
+          adoptCurrentGoalPrompt(adoptWiderWindow(adoptAutoCompaction(recalibrateTokens(parsed.data))))
+        )
       );
       // Duplicate root names would make a virtual path ambiguous.
       const seen = new Set<string>();
@@ -504,6 +510,22 @@ export async function loadConfig(): Promise<Config> {
     }
   }
   return current;
+}
+
+/**
+ * This fork ships with one remotely-managed Cloudflare Tunnel endpoint. Older local configs from
+ * before that endpoint was wired in can already say `named` while still carrying an empty public
+ * origin and the old development port. Repair only those untouched values; explicit alternatives
+ * remain the user's choice.
+ */
+function adoptProjectCloudflareTunnel(config: Config): Config {
+  if (config.tunnel.kind !== 'cloudflared') return config;
+  const tunnel = { ...config.tunnel };
+  if ((tunnel.cloudflareMode ?? DEFAULT_CLOUDFLARE_MODE) === 'named' && !tunnel.cloudflarePublicUrl?.trim()) {
+    tunnel.cloudflarePublicUrl = DEFAULT_CLOUDFLARE_PUBLIC_ORIGIN;
+  }
+  if (tunnel.cloudflareLocalPort === 28_766) tunnel.cloudflareLocalPort = DEFAULT_CLOUDFLARE_LOCAL_PORT;
+  return { ...config, tunnel };
 }
 
 /** Applies any superseded pair in OLD_TOKEN_DEFAULTS → DEFAULT_SESSIONS, untouched pairs only. */

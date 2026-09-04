@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { inboundRequestId, requestIdFromHeader, withInboundRequestId } from '../src/main/mcp/inbound.js';
+import {
+  inboundOpenAiSession,
+  inboundRequestId,
+  openAiConversationKey,
+  openAiSessionFromHeader,
+  requestIdFromHeader,
+  withInboundOpenAiSession,
+  withInboundRequestId
+} from '../src/main/mcp/inbound.js';
 
 describe('MCP inbound request id boundary', () => {
   it('normalizes the raw x-request-id to the page join key once at ingress', () => {
@@ -30,5 +38,27 @@ describe('MCP inbound request id boundary', () => {
 
     expect(seen).toEqual(['wfr_a', 'wfr_b']);
     expect(inboundRequestId()).toBeNull();
+  });
+
+  it('keeps the modern OpenAI conversation session request-local and stores only a digest key', async () => {
+    const raw = 'v1/opaque-session-value';
+    expect(openAiSessionFromHeader(raw)).toBe(raw);
+    expect(openAiSessionFromHeader([raw])).toBe(raw);
+    expect(openAiSessionFromHeader([raw, 'v1/other'])).toBeNull();
+    expect(openAiSessionFromHeader('')).toBeNull();
+    expect(openAiSessionFromHeader('x'.repeat(513))).toBeNull();
+
+    const key = openAiConversationKey(raw);
+    expect(key).toMatch(/^oai-[0-9a-f]{40}$/);
+    expect(key).not.toContain(raw);
+    expect(openAiConversationKey(raw)).toBe(key);
+    expect(openAiConversationKey('v1/other-session')).not.toBe(key);
+
+    const seen = await withInboundOpenAiSession(raw, async () => {
+      await Promise.resolve();
+      return inboundOpenAiSession();
+    });
+    expect(seen).toBe(raw);
+    expect(inboundOpenAiSession()).toBeNull();
   });
 });

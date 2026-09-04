@@ -485,8 +485,8 @@ const METHOD_HINT: Record<string, string> = {
 function methodHint(config: AppState['config']): string {
   if (config.tunnel.kind !== 'cloudflared') return METHOD_HINT[config.tunnel.kind] ?? '';
   return (config.tunnel.cloudflareMode ?? 'quick') === 'named'
-    ? 'Uses an existing Cloudflare named tunnel and fixed hostname. No new tunnel is created.'
-    : 'Creates a temporary public https address with Cloudflare. The address changes on every restart.';
+    ? 'Uses a Cloudflare named tunnel started with its Tunnel Token and an existing fixed hostname.'
+    : 'Runs cloudflared against the configured local MCP port and discovers a temporary trycloudflare.com address.';
 }
 
 function duration(seconds: number | null): string {

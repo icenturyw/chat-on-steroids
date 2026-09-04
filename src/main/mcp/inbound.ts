@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 
 /**
  * The id ChatGPT puts on the HTTP request that carries a tool call.
@@ -15,6 +16,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  * the tool dispatch reads it back.
  */
 const store = new AsyncLocalStorage<string | null>();
+const openAiSessionStore = new AsyncLocalStorage<string | null>();
 
 /** Runs `body` with the request id of the HTTP request currently being served. */
 export function withInboundRequestId<T>(requestId: string | null, body: () => T): T {
@@ -24,6 +26,45 @@ export function withInboundRequestId<T>(requestId: string | null, body: () => T)
 /** The request id of the HTTP request this call is being served on, if it had one. */
 export function inboundRequestId(): string | null {
   return store.getStore() ?? null;
+}
+
+/**
+ * Runs `body` with OpenAI's anonymized per-conversation session key for this HTTP request.
+ *
+ * Modern ChatGPT connector calls no longer necessarily carry `x-request-id`. They do carry
+ * `x-openai-session`, the HTTP projection of `_meta["openai/session"]`. Keep the raw opaque
+ * value request-local only; callers turn it into a one-way local conversation key before it
+ * reaches logs or durable storage.
+ */
+export function withInboundOpenAiSession<T>(session: string | null, body: () => T): T {
+  return openAiSessionStore.run(session, body);
+}
+
+/** Raw request-local OpenAI session key, never suitable for logging or persistence as-is. */
+export function inboundOpenAiSession(): string | null {
+  return openAiSessionStore.getStore() ?? null;
+}
+
+/**
+ * Accepts one unambiguous `x-openai-session` value without interpreting its opaque format.
+ * Duplicate values fail closed for the same reason duplicate request ids do.
+ */
+export function openAiSessionFromHeader(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value) && value.length !== 1) return null;
+  const raw = (Array.isArray(value) ? value[0] : value)?.trim();
+  return typeof raw === 'string' && raw.length > 0 && raw.length <= 512 ? raw : null;
+}
+
+/**
+ * One-way local identifier for OpenAI's opaque conversation session key.
+ *
+ * The raw value is useful only while serving the request and must not become application
+ * telemetry or durable history. A fixed-width digest gives the recorder/workspace broker a
+ * stable conversation principal without disclosing the upstream token-shaped value.
+ */
+export function openAiConversationKey(session: string | null | undefined): string | null {
+  if (typeof session !== 'string' || session.length === 0 || session.length > 512) return null;
+  return `oai-${createHash('sha256').update(session, 'utf8').digest('hex').slice(0, 40)}`;
 }
 
 /**

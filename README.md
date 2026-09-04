@@ -89,7 +89,9 @@ Core and the optional Desktop surface (Windows and macOS) use separate tunnel id
 
 ### Other tunnels
 
-**Cloudflare quick tunnel:** press **Connect**, copy the URL and use it as the MCP server URL in ChatGPT. The random path in that URL is the secret. It changes on every restart.
+**Cloudflare quick tunnel:** choose a local MCP port, press **Connect**, then copy the generated `trycloudflare.com` URL into ChatGPT. The app starts `cloudflared tunnel --url` against that fixed loopback port; the path token remains a bearer secret. When OS secure credential storage is available, Core and Desktop each keep their own token across restarts; only the temporary `trycloudflare.com` hostname changes.
+
+**Cloudflare named tunnel:** this fork defaults to `https://chat-on-steroids.icenturyw.com` with local service `http://127.0.0.1:28767`. Create the remotely-managed tunnel route in Cloudflare with that hostname and Service, then paste the tunnel's **Tunnel Token** into Chat On Steroids. The app starts that named tunnel and publishes the same secret MCP path under the fixed hostname. The Tunnel Token is kept in OS secure credential storage and passed to `cloudflared` through `TUNNEL_TOKEN`, not the process command line.
 
 **Your own HTTPS tunnel:** point it at the loopback URL the app shows and give ChatGPT the public equivalent, secret path included.
 

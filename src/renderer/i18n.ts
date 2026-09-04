@@ -146,21 +146,21 @@ const ZH_CN: Record<string, string> = {
     'ChatGPT 通过 OpenAI 隧道连接到这台电脑，不会向公网直接暴露任何服务。',
   'This app only listens on localhost. You are responsible for exposing it.':
     '本应用仅监听 localhost；如需外部访问，由你自行负责暴露服务。',
-  'Uses an existing Cloudflare named tunnel and fixed hostname. No new tunnel is created.':
-    '使用现有的 Cloudflare 命名隧道和固定主机名，不会创建新隧道。',
-  'Creates a temporary public https address with Cloudflare. The address changes on every restart.':
-    '通过 Cloudflare 创建临时公网 HTTPS 地址；每次重启后地址都会变化。',
+  'Uses a Cloudflare named tunnel started with its Tunnel Token and an existing fixed hostname.':
+    '使用 Tunnel Token 启动 Cloudflare 命名隧道，并使用已配置的固定域名。',
+  'Runs cloudflared against the configured local MCP port and discovers a temporary trycloudflare.com address.':
+    '让 cloudflared 转发已配置的本地 MCP 端口，并自动获取临时 trycloudflare.com 地址。',
   'Cloudflare mode': 'Cloudflare 模式',
-  'Quick tunnel — temporary address': '快速隧道 — 临时地址',
-  'Named tunnel — existing fixed address': '命名隧道 — 现有固定地址',
-  'In Cloudflare, create a published application route for this hostname and set its Service to http://localhost:<the port below>. Get the tunnel token from Add a replica and paste it here.':
-    '请先在 Cloudflare 中为该主机名创建 Published application 路由，并将 Service 设置为 http://localhost:<下方端口>。然后从“Add a replica”获取 Tunnel Token 并粘贴到这里。',
-  'Existing public origin': '现有公网地址',
+  'Quick tunnel — trycloudflare.com': '快速隧道 — trycloudflare.com',
+  'Named tunnel — Tunnel Token + fixed domain': '命名隧道 — Tunnel Token + 固定域名',
+  'Local MCP port': '本地 MCP 端口',
+  'Cloudflare always forwards to this loopback port. Quick Tunnel uses it automatically; a Named Tunnel hostname must route to http://127.0.0.1:<this port>.':
+    'Cloudflare 始终转发到这个本地回环端口。快速隧道会自动使用它；命名隧道的域名必须路由到 http://127.0.0.1:<此端口>。',
+  'In Cloudflare, create a published application route for this hostname and point its Service at the Local MCP port above. Then copy the Tunnel Token from Add a replica and paste it here.':
+    '请先在 Cloudflare 中为该主机名创建 Published application 路由，并将 Service 指向上面的本地 MCP 端口。然后从“Add a replica”复制 Tunnel Token 并粘贴到这里。',
+  'Fixed public URL': '固定公网 URL',
   'Use the hostname already routed to this Cloudflare tunnel. The app adds its secret MCP path.':
     '填写已经路由到此 Cloudflare 隧道的主机名；应用会自动附加保密的 MCP 路径。',
-  'Configured origin port': '已配置的源站端口',
-  'This must match the localhost port configured for the existing tunnel.':
-    '必须与现有隧道配置的 localhost 端口一致。',
   'Tunnel token': '隧道 Token',
   'Paste the existing tunnel token': '粘贴现有隧道 Token',
   'Remove stored tunnel token': '删除已保存的隧道 Token',
@@ -349,7 +349,9 @@ function localizeElement(root: ParentNode): void {
     if (element.closest(SKIP)) continue;
     for (const attribute of ['title', 'aria-label', 'placeholder']) {
       const value = element.getAttribute(attribute);
-      if (value) element.setAttribute(attribute, translateUiText(value));
+      if (!value) continue;
+      const translated = translateUiText(value);
+      if (translated !== value) element.setAttribute(attribute, translated);
     }
   }
 }
@@ -369,7 +371,10 @@ export function installUiLocale(
         const attribute = record.attributeName;
         if (attribute && ['title', 'aria-label', 'placeholder'].includes(attribute)) {
           const value = record.target.getAttribute(attribute);
-          if (value) record.target.setAttribute(attribute, translateUiText(value));
+          if (value) {
+            const translated = translateUiText(value);
+            if (translated !== value) record.target.setAttribute(attribute, translated);
+          }
         }
       }
       for (const node of record.addedNodes) {

@@ -1106,6 +1106,8 @@ export interface ToolCallInput {
   conversationId?: string | null;
   /** Durable local session principal carried by the exact request correlation, when available. */
   sessionId?: string | null;
+  /** Exact identity channel used when `conversationId` was already proven before recording. */
+  attribution?: 'request_id' | 'openai_session';
   /** A successful worker finish report is a hard activity boundary, not fresh work. */
   endsActivity?: boolean;
 }
@@ -1146,7 +1148,7 @@ export function recordToolCall(input: ToolCallInput): Promise<ToolCallRecord | n
       sessionId:
         input.sessionId ??
         (correlation?.conversationId === input.conversationId ? correlation.sessionId : null),
-      attribution: 'request_id',
+      attribution: input.attribution ?? 'request_id',
       turnId: live?.turnId ?? null
     };
     if (input.bind) bindAgentConversation(input.bind, input.conversationId);
@@ -1275,7 +1277,9 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
       attributionMethod:
         target.attribution === 'superseded'
           ? 'superseded'
-          : target.conversationId && input.requestId
+          : target.attribution === 'openai_session'
+            ? 'openai_session'
+            : target.conversationId && input.requestId
             ? 'request_id'
             : 'unattributed',
       args: await storeText(sessionId, safeJson(redactArgs(input.tool, input.args)), MAX_TOOL_ARGS_CHARS),
@@ -1310,17 +1314,22 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
         target.conversationId !== null &&
         filed?.conversationId === target.conversationId &&
         !(await conversationWasSuperseded(target.conversationId));
-      attributionListener?.(
-        target.conversationId,
-        sessionId,
-        currentConversation,
-        input.startedAt,
-        input.endsActivity === true,
-        filed?.lastAssistantFinalAt ?? null,
-        // The one thing an unattributed call still carries: the server turn it belongs to.
-        input.requestId ?? null,
-        reopenedTurnId
-      );
+      // Browser repair/Goal activity is meaningful only for a browser-addressable ChatGPT
+      // route. An OpenAI-session principal can identify a remote/mobile chat exactly, but it
+      // is intentionally not a /c/<id> that the local extension could reload or focus.
+      if (target.attribution !== 'openai_session') {
+        attributionListener?.(
+          target.conversationId,
+          sessionId,
+          currentConversation,
+          input.startedAt,
+          input.endsActivity === true,
+          filed?.lastAssistantFinalAt ?? null,
+          // The one thing an unattributed call still carries: the server turn it belongs to.
+          input.requestId ?? null,
+          reopenedTurnId
+        );
+      }
     } catch (err) {
       logWarn(`call attribution listener failed: ${(err as Error).message}`);
     }

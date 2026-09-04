@@ -142,6 +142,7 @@ export type ToolOutcome = 'ok' | 'process_exit_nonzero' | 'tool_rejected' | 'too
  */
 export type CallAttribution =
   | 'request_id'
+  | 'openai_session'
   | 'unattributed'
   | 'superseded'
   | 'turn'
@@ -170,6 +171,7 @@ export type CallAttribution =
  */
 export const ATTRIBUTION_LABELS: Record<CallAttribution, string> = {
   request_id: 'exact request id',
+  openai_session: 'OpenAI conversation session',
   unattributed: 'request id not resolved',
   superseded: 'retired conversation',
   agent: 'agent key',
@@ -184,10 +186,10 @@ export interface ToolCallRecord {
   attribution: CallAttribution;
   /** Normalized inbound HTTP x-request-id, retained for forensic correlation. */
   requestId: string | null;
-  /** Conversation proven by that request id, or null when ownership was unresolved. */
+  /** Conversation principal proven by request/page evidence or OpenAI session metadata. */
   conversationId: string | null;
   /** Deterministic placement outcome for current, unresolved, or deliberately retired callers. */
-  attributionMethod: 'request_id' | 'unattributed' | 'superseded';
+  attributionMethod: 'request_id' | 'openai_session' | 'unattributed' | 'superseded';
   /** Exact arguments as JSON. Cut inline past the cap, with the whole text in an asset. */
   args: StoredText;
   result: StoredText;

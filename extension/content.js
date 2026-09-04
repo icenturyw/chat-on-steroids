@@ -3051,10 +3051,18 @@
     return found;
   }
 
-  async function confirmLiveRequestOwners(calls, ownerConversation) {
-    if (!Array.isArray(calls) || calls.length === 0 || !ownerConversation) return;
+  async function confirmLiveRequestOwners(calls, sessions, ownerConversation) {
+    if (!ownerConversation) return;
+    const sessionBatch = [];
+    const sessionSeen = new Set();
+    for (const evidence of Array.isArray(sessions) ? sessions : []) {
+      const openaiSession = evidence && typeof evidence.openaiSession === 'string' ? evidence.openaiSession : null;
+      if (!openaiSession || sessionSeen.has(openaiSession)) continue;
+      sessionSeen.add(openaiSession);
+      sessionBatch.push(evidence);
+    }
     const byRequest = new Map();
-    for (const call of calls) {
+    for (const call of Array.isArray(calls) ? calls : []) {
       if (!call || !call.requestId || byRequest.has(call.requestId)) continue;
       if (requestOwnersConfirmed.get(call.requestId) === ownerConversation) continue;
       const key = `${ownerConversation}\u0000${call.requestId}`;
@@ -3063,12 +3071,13 @@
       requestOwnersPending.add(key);
     }
     const batch = [...byRequest.values()];
-    if (batch.length === 0) return;
+    if (batch.length === 0 && sessionBatch.length === 0) return;
     try {
       const reply = await ask({
         type: 'correlate',
         conversationId: ownerConversation,
-        calls: batch
+        calls: batch,
+        sessions: sessionBatch
       });
       const data = reply && reply.ok === true && reply.data && typeof reply.data === 'object' ? reply.data : null;
       const confirmed = new Set(data && Array.isArray(data.confirmed) ? data.confirmed : []);
@@ -3314,6 +3323,8 @@
       // unattributed. Labelled rows go first so the id carries its tool when both exist.
       const ownerCalls = [];
       const ownerSeen = new Set();
+      const ownerSessions = [];
+      const ownerSessionSeen = new Set();
       for (const source of ['calls', 'requests']) {
         for (const turn of answer.turns) {
           const pageConversation = concreteConversation(turn.conversationId);
@@ -3325,7 +3336,16 @@
           }
         }
       }
-      const ownerConfirmation = confirmLiveRequestOwners(ownerCalls, askedConversation);
+      for (const turn of answer.turns) {
+        const pageConversation = concreteConversation(turn.conversationId);
+        if (turn !== ownedPageTurn && pageConversation !== askedConversation) continue;
+        for (const evidence of turn.sessions || []) {
+          if (!evidence || !evidence.openaiSession || ownerSessionSeen.has(evidence.openaiSession)) continue;
+          ownerSessionSeen.add(evidence.openaiSession);
+          ownerSessions.push(evidence);
+        }
+      }
+      const ownerConfirmation = confirmLiveRequestOwners(ownerCalls, ownerSessions, askedConversation);
       // `ownedPageTurn` has one deliberately narrow exception to the ordinary conversation
       // filter: on a fresh chat, the real /c/<id> can exist while that live turn's React branch
       // still carries a provisional client thread id. The explicit /correlations handshake is

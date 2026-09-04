@@ -229,7 +229,7 @@ describe('Cloudflare named tunnel', () => {
   it('keeps the token out of argv and publishes the fixed origin with the secret MCP path', async () => {
     const reports: any[] = [];
     const handle = await startTunnel({
-      localUrl: 'http://127.0.0.1:28766/mcp/core/session-secret',
+      localUrl: 'http://127.0.0.1:28767/mcp/core/session-secret',
       settings: {
         kind: 'cloudflared',
         tunnelId: '',
@@ -237,7 +237,7 @@ describe('Cloudflare named tunnel', () => {
         binaryPath: '',
         cloudflareMode: 'named',
         cloudflarePublicUrl: 'https://mcp.example.com',
-        cloudflareLocalPort: 28766
+        cloudflareLocalPort: 28767
       },
       apiKey: null,
       cloudflareToken: 'named-token-secret',
@@ -259,6 +259,50 @@ describe('Cloudflare named tunnel', () => {
     expect(reports.at(-1)).toMatchObject({
       state: 'connected',
       publicUrl: 'https://mcp.example.com/mcp/core/session-secret'
+    });
+
+    await handle.stop();
+  });
+});
+
+describe('Cloudflare quick tunnel', () => {
+  it('forwards the fixed loopback port and publishes the discovered trycloudflare URL', async () => {
+    const reports: any[] = [];
+    const handle = await startTunnel({
+      localUrl: 'http://127.0.0.1:28767/mcp/core/session-secret',
+      settings: {
+        kind: 'cloudflared',
+        tunnelId: '',
+        desktopTunnelId: '',
+        binaryPath: '',
+        cloudflareMode: 'quick',
+        cloudflarePublicUrl: '',
+        cloudflareLocalPort: 28767
+      },
+      apiKey: null,
+      report: (report) => reports.push(report)
+    });
+
+    expect(fixture.spawn).toHaveBeenCalledWith(
+      'tunnel-client-test',
+      [
+        'tunnel',
+        '--no-autoupdate',
+        '--url',
+        'http://127.0.0.1:28767',
+        '--http-host-header',
+        '127.0.0.1:28767'
+      ],
+      expect.any(Object)
+    );
+
+    fixture.children[0].stderr.emit(
+      'data',
+      Buffer.from('INF Your quick Tunnel has been created! https://demo.trycloudflare.com\n')
+    );
+    expect(reports.at(-1)).toMatchObject({
+      state: 'connected',
+      publicUrl: 'https://demo.trycloudflare.com/mcp/core/session-secret'
     });
 
     await handle.stop();

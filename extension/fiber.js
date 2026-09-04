@@ -934,6 +934,36 @@
     return out;
   }
 
+  /**
+   * ChatGPT's Apps SDK publishes `_meta["openai/session"]` as the stable anonymized
+   * conversation key for MCP tool calls. Probe only structured metadata containers and only
+   * export that exact documented field. Message text is deliberately never parsed here.
+   */
+  function openAiSessionsOf(messages) {
+    if (!Array.isArray(messages)) return [];
+    const out = [];
+    const seen = new Set();
+    const read = (container, messageId) => {
+      if (!container || typeof container !== 'object') return;
+      const value = str(container['openai/session']);
+      if (!value || value.length > 512 || seen.has(value)) return;
+      seen.add(value);
+      out.push({ openaiSession: value, messageId });
+    };
+    for (let at = 0; at < messages.length && out.length < MAX_CALLS; at++) {
+      const message = messages[at];
+      if (!message || typeof message !== 'object') continue;
+      const messageId = str(message.id);
+      const metadata = message.metadata && typeof message.metadata === 'object' ? message.metadata : null;
+      const content = message.content && typeof message.content === 'object' ? message.content : null;
+      read(message._meta, messageId);
+      read(metadata, messageId);
+      read(metadata && metadata._meta, messageId);
+      read(content && content._meta, messageId);
+    }
+    return out;
+  }
+
   /** "/Chat On Steroids Core/link_…/read" -> "read", or null if that is not a name. */
   function toolName(value) {
     if (typeof value !== 'string' || value.length === 0) return null;
@@ -1183,6 +1213,7 @@
         const messages = turnMessagesOf(fiber);
         const calls = callsOf(messages);
         const requests = requestIdsOf(messages);
+        const sessions = openAiSessionsOf(messages);
         const turnBudget = { remaining: Math.min(MAX_TURN_TEXT, responseBudget.remaining) };
         const before = turnBudget.remaining;
         const renderedMessages = renderedMessagesOf(group.sections, messages, turnBudget);
@@ -1191,6 +1222,7 @@
         if (
           calls.length === 0 &&
           requests.length === 0 &&
+          sessions.length === 0 &&
           renderedMessages.length === 0 &&
           activities.length === 0
         ) continue;
@@ -1204,6 +1236,7 @@
           endMessageId: turnEndMessageId(messages),
           calls,
           requests,
+          sessions,
           messages: renderedMessages,
           activities
         };

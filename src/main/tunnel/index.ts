@@ -7,9 +7,9 @@
  *
  * Two adapters ship:
  *  - openai: OpenAI's Secure MCP Tunnel. Outbound-only, nothing is published.
- *  - cloudflared: a generic HTTPS quick tunnel, for plans or accounts that cannot
- *    use the OpenAI tunnel. This one does create a public URL, so the secret path
- *    token in the URL is what keeps it private.
+ *  - cloudflared: Quick Tunnel or a remotely managed Named Tunnel. Both expose the
+ *    same fixed loopback MCP port; the secret path token in the URL remains the MCP
+ *    authorization boundary.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -744,6 +744,8 @@ async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle>
     opts.report({ state: 'tunnel-unavailable', detail: `Could not start cloudflared: ${err.message}` });
   });
 
+  // coding-tools-mcp's desktop client gives cloudflared a short readiness window instead of
+  // leaving a half-started tunnel around indefinitely. Keep the same operational shape here.
   const startupTimer = setTimeout(() => {
     if (!settled && !stopped) {
       opts.report({
@@ -755,7 +757,7 @@ async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle>
             : 'cloudflared did not report a public URL within 45 seconds.')
       });
     }
-  }, 45_000);
+  }, 12_000);
   startupTimer.unref?.();
 
   return {

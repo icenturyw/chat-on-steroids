@@ -434,33 +434,36 @@
                 <div class="field">
                   <label for="cloudflareMode">Cloudflare mode</label>
                   <select id="cloudflareMode">
-                    <option value="quick">Quick tunnel — temporary address</option>
-                    <option value="named">Named tunnel — existing fixed address</option>
+                    <option value="quick">Quick tunnel — trycloudflare.com</option>
+                    <option value="named">Named tunnel — Tunnel Token + fixed domain</option>
                   </select>
+                </div>
+
+                <div class="field">
+                  <label for="cloudflareLocalPort">Local MCP port</label>
+                  <input id="cloudflareLocalPort" type="number" min="1" max="65535" value="28767" />
+                  <p class="hint">
+                    Cloudflare always forwards to this loopback port. Quick Tunnel uses it automatically;
+                    a Named Tunnel hostname must route to http://127.0.0.1:&lt;this port&gt;.
+                  </p>
                 </div>
 
                 <div id="cloudflareNamedSettings" hidden>
                   <p class="hint">
-                    In Cloudflare, create a published application route for this hostname and set
-                    its Service to http://localhost:&lt;the port below&gt;. Get the tunnel token from Add
-                    a replica and paste it here.
+                    In Cloudflare, create a published application route for this hostname and point
+                    its Service at the Local MCP port above. Then copy the Tunnel Token from Add a
+                    replica and paste it here.
                   </p>
 
                   <div class="field">
-                    <label for="cloudflarePublicUrl">Existing public origin</label>
+                    <label for="cloudflarePublicUrl">Fixed public URL</label>
                     <input
                       id="cloudflarePublicUrl"
                       type="url"
                       spellcheck="false"
-                      placeholder="https://mcp.example.com"
+                      placeholder="https://chat-on-steroids.icenturyw.com"
                     />
                     <p class="hint">Use the hostname already routed to this Cloudflare tunnel. The app adds its secret MCP path.</p>
-                  </div>
-
-                  <div class="field">
-                    <label for="cloudflareLocalPort">Configured origin port</label>
-                    <input id="cloudflareLocalPort" type="number" min="1" max="65535" value="28766" />
-                    <p class="hint">This must match the localhost port configured for the existing tunnel.</p>
                   </div>
 
                   <div class="field">

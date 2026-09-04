@@ -25,11 +25,14 @@ import { effectiveCapabilities, defaultConfig } from '../src/main/config.js';
 import { lastRequestAt, selfTestHeaders, startMcpServer, tunnelProbeHeaders, type McpEndpoint } from '../src/main/mcp/server.js';
 import { lastToolCallAt, type ToolContext } from '../src/main/mcp/tools.js';
 import { friendlyError } from '../src/main/mcp/kernel.js';
+import { openAiConversationKey } from '../src/main/mcp/inbound.js';
 import { SURFACE_LIST, surfaceDefinition, type SurfaceId } from '../src/main/mcp/surfaces.js';
 import {
   appendEvent,
   createSession,
+  findSessionByConversation,
   initSessionStore,
+  readEvents,
   rebindSession,
   upsertMessageEvent,
   writeOverflowText
@@ -318,6 +321,18 @@ describe('endpoint hardening', () => {
     }
     expect(endpoint.url).toBe(endpoint.urls.core);
     expect(endpoint.urls.core).not.toBe(endpoint.urls.desktop);
+  });
+
+  it('uses caller-supplied stable surface path tokens verbatim', async () => {
+    await endpoint.stop();
+    const coreToken = 'A'.repeat(43);
+    const desktopToken = 'B'.repeat(43);
+    endpoint = await startMcpServer(() => ctx, {
+      surfaceTokens: { core: coreToken, desktop: desktopToken }
+    });
+
+    expect(new URL(endpoint.urls.core).pathname).toBe(`/mcp/core/${coreToken}`);
+    expect(new URL(endpoint.urls.desktop).pathname).toBe(`/mcp/desktop/${desktopToken}`);
   });
 
   it('gives each surface its own token, so handing out one does not hand out the other', async () => {
@@ -1917,6 +1932,32 @@ describe('bounded output', () => {
     expect(failed(reply)).toBe(false);
     expect(textOf(reply)).toContain('/workspace/src/app.ts');
     expect(textOf(reply)).toContain('/workspace/src/lib/util.ts');
+  });
+
+  it('attributes a modern ChatGPT call by OpenAI conversation session when x-request-id is absent', async () => {
+    const rawSession = `v1/test-${randomBytes(16).toString('hex')}`;
+    const conversationId = openAiConversationKey(rawSession)!;
+
+    const reply = await modern(
+      'tools/call',
+      { name: 'read', arguments: { paths: ['/workspace/notes.txt'], start_line: 1, end_line: 1 } },
+      { 'x-openai-session': rawSession }
+    );
+    expect(failed(reply)).toBe(false);
+
+    const summary = await findSessionByConversation(conversationId);
+    expect(summary).not.toBeNull();
+    const calls = (await readEvents(summary!.id, { kinds: ['tool_call'] })).filter(
+      (event) => event.kind === 'tool_call'
+    );
+    const call = calls.at(-1);
+    expect(call?.kind).toBe('tool_call');
+    if (call?.kind !== 'tool_call') throw new Error('tool call was not recorded');
+    expect(call.call.attribution).toBe('openai_session');
+    expect(call.call.attributionMethod).toBe('openai_session');
+    expect(call.call.requestId).toBeNull();
+    expect(call.call.conversationId).toBe(conversationId);
+    expect(JSON.stringify(call)).not.toContain(rawSession);
   });
 
   it('returns only the requested line range', async () => {

@@ -272,6 +272,8 @@ export async function startMcpServer(
     publicHostname?: string;
     /** Stable bearer tokens supplied by the connection layer when secure storage is available. */
     surfaceTokens?: Partial<Record<SurfaceId, string>>;
+    /** Called after a real ChatGPT request reaches a validated MCP surface. */
+    onRequest?: () => void;
   } = {}
 ): Promise<McpEndpoint> {
   // A bearer token in the path is what authorises callers. The connection layer normally
@@ -409,6 +411,7 @@ export async function startMcpServer(
     if (!selfTest && !tunnelProbe) {
       requestSeenAt = Date.now();
       surfaceRequestAt.set(route.id, requestSeenAt);
+      options.onRequest?.();
     }
 
     const declaredHeader = req.headers['content-length'];

@@ -317,6 +317,10 @@ async function connectImpl(): Promise<void> {
     const namedHostname = namedOrigin ? new URL(namedOrigin).hostname : null;
     const cloudflarePort = config.tunnel.cloudflareLocalPort ?? DEFAULT_CLOUDFLARE_LOCAL_PORT;
     const surfaceTokens = await persistentMcpPathTokens();
+    // MCP request clocks are updated inside server.ts rather than through the connection state
+    // machine. Publish a state tick when that happens so the renderer sees end-to-end ChatGPT
+    // proof immediately instead of waiting for an unrelated tunnel status report.
+    const liveRequest = (): void => setStatus({ lastRequestAt: lastRequestAt() });
     let startedEndpoint: McpEndpoint;
     try {
       startedEndpoint = await startMcpServer(
@@ -333,9 +337,10 @@ async function connectImpl(): Promise<void> {
           ? {
               port: cloudflarePort,
               ...(namedHostname ? { publicHostname: namedHostname } : {}),
-              surfaceTokens
+              surfaceTokens,
+              onRequest: liveRequest
             }
-          : { surfaceTokens }
+          : { surfaceTokens, onRequest: liveRequest }
       );
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;

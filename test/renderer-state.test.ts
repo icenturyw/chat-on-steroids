@@ -17,6 +17,14 @@ it('selects Simplified Chinese without changing Traditional Chinese locales', ()
 it('translates fixed and counted renderer chrome into Simplified Chinese', () => {
   expect(translateUiText('Setup')).toBe('设置');
   expect(translateUiText('no handshake yet')).toBe('尚未完成握手');
+  expect(translateUiText('just now')).toBe('刚刚');
+  expect(translateUiText('now')).toBe('刚刚');
+  expect(translateUiText('verified ChatGPT link')).toBe('已验证 ChatGPT 链路');
+  expect(translateUiText('waiting for first ChatGPT call')).toBe('等待 ChatGPT 首次调用');
+  expect(translateUiText('ChatGPT reached this app 8s ago')).toBe('ChatGPT 已连接到本应用：8 秒前');
+  expect(translateUiText('Connector route')).toBe('连接器链路');
+  expect(translateUiText('ChatGPT → this app')).toBe('ChatGPT → 本应用');
+  expect(translateUiText('waiting')).toBe('等待中');
   expect(translateUiText('4 permissions')).toBe('4 项权限');
   expect(translateUiText('9 total · 1 folder')).toBe('共 9 个 · 1 个文件夹');
   expect(translateUiText('4 messages · 11 tools')).toBe('4 条消息 · 11 次工具调用');
@@ -170,6 +178,38 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
   stateListener(withTools);
   expect(w.document.getElementById('facts')!.textContent).toContain('Tools across Core + Desktop3 total');
   expect(w.document.getElementById('facts')!.textContent).not.toContain('of 9');
+
+  // Generic tunnels cannot produce OpenAI tunnel-client handshake metrics. Their end-to-end
+  // proof is the last request ChatGPT actually delivered to this MCP server, so the UI must
+  // never claim that a Cloudflare connection is still waiting for an OpenAI-only handshake.
+  const cloudflareWaiting = structuredClone(withTools) as any;
+  cloudflareWaiting.config.tunnel = {
+    ...cloudflareWaiting.config.tunnel,
+    kind: 'cloudflared',
+    cloudflareMode: 'named',
+    cloudflarePublicUrl: 'https://mcp.example.com',
+    cloudflareLocalPort: 28767
+  };
+  cloudflareWaiting.status.state = 'connected';
+  cloudflareWaiting.status.handshakeAt = null;
+  cloudflareWaiting.status.lastRequestAt = null;
+  stateListener(cloudflareWaiting);
+  expect(w.document.getElementById('bigHandshakeLabel')!.textContent).toBe('verified ChatGPT link');
+  expect(w.document.getElementById('bigHandshake')!.textContent).toBe('—');
+  expect(w.document.getElementById('liveNote')!.textContent).toBe('waiting for first ChatGPT call');
+  expect(w.document.getElementById('facts')!.textContent).toContain('Connector routeConnected');
+  expect(w.document.getElementById('facts')!.textContent).toContain('ChatGPT → this appwaiting');
+  expect(w.document.getElementById('facts')!.textContent).not.toContain('Route to OpenAI');
+  expect(w.document.getElementById('facts')!.textContent).not.toContain('Poll errors');
+  expect(w.document.getElementById('facts')!.textContent).not.toContain('Tunnel → this app');
+
+  const cloudflareCalled = structuredClone(cloudflareWaiting) as any;
+  cloudflareCalled.status.lastRequestAt = Date.now();
+  stateListener(cloudflareCalled);
+  expect(w.document.getElementById('bigHandshake')!.textContent).toBe('now');
+  expect(w.document.getElementById('liveNote')!.textContent).toContain('ChatGPT reached this app');
+  expect(w.document.getElementById('liveNote')!.textContent).not.toContain('handshake');
+  expect(w.document.getElementById('facts')!.textContent).toContain('ChatGPT → this appjust now');
 
   const withMissingMacAccess = structuredClone(withTools) as any;
   withMissingMacAccess.platform = { family: 'macos', name: 'macOS', desktopAutomation: true };

@@ -14,6 +14,8 @@ const ZH_CN: Record<string, string> = {
   'Sign-in failed': '身份验证失败',
   'Tunnel unavailable': '隧道不可用',
   'no handshake yet': '尚未完成握手',
+  'just now': '刚刚',
+  now: '刚刚',
   Disconnecting: '正在断开',
   Offline: '已离线',
   Error: '错误',
@@ -39,8 +41,13 @@ const ZH_CN: Record<string, string> = {
   'Run checks': '运行检查',
   'Checking…': '正在检查…',
   'verified link': '已验证链路',
+  'verified ChatGPT link': '已验证 ChatGPT 链路',
   'last ChatGPT call': '最后一次 ChatGPT 调用',
+  'waiting for first ChatGPT call': '等待 ChatGPT 首次调用',
   'Route to OpenAI': '到 OpenAI 的路由',
+  'Connector route': '连接器链路',
+  'ChatGPT → this app': 'ChatGPT → 本应用',
+  waiting: '等待中',
   'Tools across Core + Desktop': 'Core + Desktop 工具',
   Activity: '活动',
   SESSIONS: '会话',
@@ -304,6 +311,8 @@ export function translateUiText(value: string): string {
     const unit = { s: '秒', m: '分钟', h: '小时', d: '天' }[match[2] as 's' | 'm' | 'h' | 'd'];
     return `${match[1]} ${unit}前`;
   }
+  match = /^ChatGPT reached this app (.+)$/.exec(normalized);
+  if (match) return `ChatGPT 已连接到本应用：${translateUiText(match[1] ?? '')}`;
   match = /^Tools: (.+)$/.exec(normalized);
   if (match) return `工具：${match[1]}`;
   match = /^Connected\. Listening on (.+) · last message just now\.$/.exec(normalized);

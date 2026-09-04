@@ -1186,23 +1186,33 @@ function facts(next: AppState): HTMLElement[] {
   const { status, config } = next;
   const rows: [string, string, boolean?][] = [];
   const health = status.health;
+  const openAiTunnel = config.tunnel.kind === 'openai';
 
   if (isRunning(status.state)) {
-    rows.push(['Route to OpenAI', health?.route ?? 'starting…']);
-    rows.push([
-      'Poll errors',
-      health?.pollErrors === null || health?.pollErrors === undefined
-        ? '—'
-        : String(health.pollErrors),
-      (health?.pollErrors ?? 0) > 0
-    ]);
-    const probe = health?.probe ?? null;
-    rows.push([
-      'Tunnel → this app',
-      probe ?? 'checking…',
-      probe !== null && probe !== 'ok' && probe !== 'success' && probe !== 'healthy'
-    ]);
-    rows.push(['Tunnel uptime', duration(health?.uptimeSeconds ?? null)]);
+    if (openAiTunnel) {
+      rows.push(['Route to OpenAI', health?.route ?? 'starting…']);
+      rows.push([
+        'Poll errors',
+        health?.pollErrors === null || health?.pollErrors === undefined
+          ? '—'
+          : String(health.pollErrors),
+        (health?.pollErrors ?? 0) > 0
+      ]);
+      const probe = health?.probe ?? null;
+      rows.push([
+        'Tunnel → this app',
+        probe ?? 'checking…',
+        probe !== null && probe !== 'ok' && probe !== 'success' && probe !== 'healthy'
+      ]);
+      rows.push(['Tunnel uptime', duration(health?.uptimeSeconds ?? null)]);
+      if (health?.clientVersion) rows.push(['Tunnel client', health.clientVersion]);
+    } else {
+      // Cloudflare/manual transports do not expose tunnel-client control-plane metrics.
+      // Show only facts this app can actually prove instead of permanent "starting/checking"
+      // placeholders that look like a broken connection after ChatGPT is already using it.
+      rows.push(['Connector route', STATUS_TEXT[status.state]]);
+      rows.push(['ChatGPT → this app', status.lastRequestAt === null ? 'waiting' : ago(status.lastRequestAt)]);
+    }
     // Requests but no tool call is what an account with Developer mode switched off
     // looks like from here, and it is invisible in every other number on this card.
     if (status.lastRequestAt !== null) {
@@ -1212,10 +1222,9 @@ function facts(next: AppState): HTMLElement[] {
         status.lastToolCallAt === null
       ]);
     }
-    if (health?.clientVersion) rows.push(['Tunnel client', health.clientVersion]);
     if (status.localUrl) rows.push(['Local server', status.localUrl.replace(/^https?:\/\//, '')]);
   } else {
-    rows.push(['Route to OpenAI', 'not running']);
+    rows.push([openAiTunnel ? 'Route to OpenAI' : 'Connector route', 'not running']);
   }
 
   rows.push([
@@ -1235,27 +1244,39 @@ function facts(next: AppState): HTMLElement[] {
 
 /**
  * Repaints only what ages: the two numbers and the header note. Runs every second so
- * "verified 8s ago" keeps counting between reports instead of freezing.
+ * proof ages keep counting between reports instead of freezing.
+ *
+ * OpenAI's tunnel has its own control-plane handshake timestamp. Generic tunnels do not:
+ * for Cloudflare/manual transport the strongest end-to-end proof is an actual request that
+ * ChatGPT delivered to this MCP server. Never label the absence of an OpenAI-only metric as
+ * a failed/pending handshake on a transport that cannot produce it.
  */
 function paintClock(): void {
   if (!state) return;
-  const { status } = state;
+  const { status, config } = state;
   const running = isRunning(status.state);
   const connected = status.state === 'connected';
+  const openAiTunnel = config.tunnel.kind === 'openai';
+  const proofAt = openAiTunnel ? status.handshakeAt : status.lastRequestAt;
 
   const handshake = $('bigHandshake');
-  handshake.textContent = shortAgo(status.handshakeAt);
+  handshake.textContent = shortAgo(proofAt);
   handshake.className = connected ? '' : status.state === 'offline' ? 'is-bad' : 'is-cold';
+  $('bigHandshakeLabel').textContent = openAiTunnel ? 'verified link' : 'verified ChatGPT link';
 
   const request = $('bigRequest');
   request.textContent = shortAgo(status.lastRequestAt);
   request.className = status.lastRequestAt === null ? 'is-cold' : '';
 
-  $('liveNote').textContent = running
-    ? status.handshakeAt === null
-      ? 'no handshake yet'
-      : `verified ${ago(status.handshakeAt)}`
-    : '';
+  $('liveNote').textContent = !running
+    ? ''
+    : openAiTunnel
+      ? status.handshakeAt === null
+        ? 'no handshake yet'
+        : `verified ${ago(status.handshakeAt)}`
+      : status.lastRequestAt === null
+        ? 'waiting for first ChatGPT call'
+        : `ChatGPT reached this app ${ago(status.lastRequestAt)}`;
 }
 
 window.setInterval(paintClock, 1000);

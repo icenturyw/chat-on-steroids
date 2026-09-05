@@ -25,6 +25,7 @@ it('translates fixed and counted renderer chrome into Simplified Chinese', () =>
   expect(translateUiText('Connector route')).toBe('连接器链路');
   expect(translateUiText('ChatGPT → this app')).toBe('ChatGPT → 本应用');
   expect(translateUiText('waiting')).toBe('等待中');
+  expect(translateUiText('Manage folders')).toBe('管理文件夹');
   expect(translateUiText('4 permissions')).toBe('4 项权限');
   expect(translateUiText('9 total · 1 folder')).toBe('共 9 个 · 1 个文件夹');
   expect(translateUiText('4 messages · 11 tools')).toBe('4 条消息 · 11 次工具调用');

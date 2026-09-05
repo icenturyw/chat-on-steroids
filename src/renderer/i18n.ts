@@ -59,6 +59,7 @@ const ZH_CN: Record<string, string> = {
   'Show all steps': '显示全部步骤',
   'Hide finished steps': '隐藏已完成步骤',
   'Pick a folder to share': '选择要共享的文件夹',
+  'Manage folders': '管理文件夹',
   'None yet': '尚未选择',
   'Nothing outside the folders you approve is reachable. Do this first — the tunnel will not start with nothing to serve.':
     '只能访问你批准的文件夹。请先完成此步骤——没有可提供的文件夹时，隧道不会启动。',

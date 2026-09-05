@@ -97,6 +97,13 @@
       const outcome = { completed: '已完成', failed: '失败', stopped: '已停止', cancelled: '已取消' }[match[1]];
       return `回合${outcome}${match[2] || ''}`;
     }
+    match = /^(.+) · (completed|failed|refused|unknown)(?: · (\d+) ms)?$/.exec(normalized);
+    if (match) {
+      const outcome = { completed: '已完成', failed: '失败', refused: '已拒绝', unknown: '未知' }[match[2]];
+      return `${match[1]} · ${outcome}${match[3] ? ` · ${match[3]} 毫秒` : ''}`;
+    }
+    match = /^(\d+) more changed files$/.exec(normalized);
+    if (match) return `另外 ${match[1]} 个已更改文件`;
     return value;
   }
 

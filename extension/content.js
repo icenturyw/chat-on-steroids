@@ -4951,7 +4951,8 @@
     for (const detail of streamToolDetails(entry)) {
       const line = document.createElement('div');
       line.className = `clf-stream-tool-${detail.kind}`;
-      line.textContent = detail.text;
+      // Keep file paths literal while localising app-owned status/count metadata.
+      line.textContent = detail.kind === 'change' ? detail.text : (globalThis.CLF_I18N?.t(detail.text) || detail.text);
       panel.append(line);
     }
     disclosure.append(row, panel);

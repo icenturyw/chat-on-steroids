@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => {
     endpointStop: vi.fn(async (_options?: { forceAfterMs?: number }) => undefined),
     endpointOptions: null as null | { port?: number; publicHostname?: string },
     surfaceTokens: null as null | Record<string, string>,
+    publication: vi.fn((surface: string, observe: (name: string, version: string, instructions: string, tools: unknown[]) => void) => observe('Chat On Steroids ' + surface, '1', 'instructions', [])),
     endpointStartGate: null as Promise<void> | null,
     endpointStartError: null as NodeJS.ErrnoException | null,
     endpointStartReached: vi.fn(),
@@ -82,6 +83,7 @@ vi.mock('../src/main/mcp/server.js', () => ({
     const port = options.port ?? 45_678;
     return {
       port,
+      publication: mocks.publication,
       url: `http://127.0.0.1:${port}/mcp/core/core-token`,
       urls: {
         core: `http://127.0.0.1:${port}/mcp/core/core-token`,
@@ -126,6 +128,7 @@ describe('connection surface state', () => {
     mocks.starts = 0;
     mocks.prewarm.mockClear();
     mocks.endpointStop.mockClear();
+    mocks.publication.mockClear();
     mocks.endpointStartReached.mockClear();
     mocks.endpointOptions = null;
     mocks.surfaceTokens = null;
@@ -272,6 +275,22 @@ describe('connection surface state', () => {
 
     expect(mocks.starts).toBe(2);
     expect(mocks.endpointOptions).toEqual({ port: 28_768 });
+  });
+
+  it('publishes refresh declarations only for live surfaces and does not rebuild on unchanged health reports', async () => {
+    const connection = await import('../src/main/connection.js');
+    const refresh = await import('../src/main/plugin-refresh.js');
+    expect(refresh.pluginRefreshPublications()).toEqual([]);
+    await connection.connect();
+    expect(refresh.pluginRefreshPublications().map(row => row.surface)).toEqual(['core']);
+    const first = refresh.pluginRefreshPublications()[0]!.schemaId;
+    const calls = mocks.publication.mock.calls.length;
+    mocks.report?.({ state: 'connected', detail: 'Still healthy' });
+    expect(mocks.publication).toHaveBeenCalledTimes(calls);
+    await connection.applySettings();
+    expect(refresh.pluginRefreshPublications()[0]!.schemaId).toBe(first);
+    await connection.disconnect();
+    expect(refresh.pluginRefreshPublications()).toEqual([]);
   });
 
   it('drops the previous tunnel state and URL from connector cards after disconnect', async () => {

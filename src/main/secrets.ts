@@ -57,14 +57,16 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
  * config.json, the log and the renderer.
  */
 /**
- * `bridgeToken` is not a user credential either way; `openRouterApiKey` is one, and is the
- * only credential in here that a *model* can cause to be spent, so it lives under the same
- * OS-backed encrypted blob as the rest and never leaves the main process.
+ * `bridgeToken` is not a user credential either way; `openRouterApiKey` and
+ * `customProviderApiKey` are the two credentials a *model* can cause to be spent (Goal/Loop
+ * drafts, one per active provider), so they live under the same OS-backed encrypted blob
+ * as the rest and never leave the main process.
  */
 export type SecretKey =
   | 'openaiApiKey'
   | 'bridgeToken'
   | 'openRouterApiKey'
+  | 'customProviderApiKey'
   | 'cloudflareTunnelToken'
   | 'mcpCorePathToken'
   | 'mcpDesktopPathToken';

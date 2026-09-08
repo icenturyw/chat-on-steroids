@@ -104,6 +104,31 @@ beforeEach(() => {
 });
 
 describe('OpenAI tunnel process ownership', () => {
+  it('classifies structured control-plane context together with its network error', async () => {
+    vi.useFakeTimers();
+    const reports: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/readyz') return new Response('ok');
+      if (url.pathname === '/metrics') return new Response('commands_poll_last_successful_timestamp_seconds 0\ncommands_poll_errors_total 1\n');
+      if (url.pathname === '/api/status') return Response.json({ uptime_seconds: 50, channels: [] });
+      return new Response('missing', { status: 404 });
+    }));
+    const handle = await startTunnel({ localUrl: 'http://127.0.0.1:1234/secret', settings, apiKey: 'test', report: r => reports.push(r) });
+    await vi.advanceTimersByTimeAsync(10);
+    fixture.health.url = 'http://127.0.0.1:34567';
+    await vi.advanceTimersByTimeAsync(1_000);
+    const child = fixture.children[0];
+    child.stderr.emit('data', Buffer.from(JSON.stringify({ level: 'WARN', msg: 'MCP probe failed', error: 'dial tcp: i/o timeout' }) + '\n'));
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(reports.some(r => r.state === 'offline')).toBe(false);
+    child.stderr.emit('data', Buffer.from(JSON.stringify({ level: 'WARN', msg: 'poll failed; backing off', error: 'dial tcp: i/o timeout' }) + '\n'));
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(reports.at(-1).state).toBe('offline');
+    expect(fixture.children).toHaveLength(1);
+    await handle.stop();
+  });
+
   it('claims one restart and waits for the old process tree before launching its replacement', async () => {
     vi.useFakeTimers();
     const reports: any[] = [];
@@ -142,6 +167,58 @@ describe('OpenAI tunnel process ownership', () => {
     expect(fixture.children).toHaveLength(2);
   });
 
+  /**
+   * Terminating the client kills every request travelling through it.
+   *
+   * /readyz is asked once per pass, with a three-second timeout and no retry, and a single
+   * `false` used to replace the process outright. A probe can miss without the client being
+   * broken — mid-transfer, a briefly loaded machine, a slow downstream readiness check — and
+   * every tool call in flight died with it. The model then waited for an answer that could no
+   * longer arrive, which ChatGPT ends with "Message delivery timed out. Please try again."
+   *
+   * The same rule the offline caption already follows (see UNREACHABLE_CONFIRM_MS): one failed
+   * poll is not a verdict. A genuinely dead client still gets replaced one pass later.
+   */
+  it('replaces the client only after a readiness failure survives a second pass', async () => {
+    vi.useFakeTimers();
+    let ready = true;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/readyz') return ready ? new Response('ok') : new Response('mcp probe failed', { status: 503 });
+      if (url.pathname === '/metrics') return new Response('commands_poll_last_successful_timestamp_seconds 1\ncommands_poll_errors_total 0\n');
+      if (url.pathname === '/api/status') return Response.json({ uptime_seconds: 50, channels: [] });
+      return new Response('missing', { status: 404 });
+    }));
+    const handle = await startTunnel({
+      localUrl: 'http://127.0.0.1:1234/secret',
+      settings,
+      apiKey: 'sk-tunnel-test',
+      report: () => undefined
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fixture.health.url = 'http://127.0.0.1:34567';
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fixture.children).toHaveLength(1);
+
+    // One missed probe, then the client answers again: the run it was carrying is untouched.
+    ready = false;
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(fixture.children, 'a single missed probe must not replace the client').toHaveLength(1);
+    expect(fixture.terminate).not.toHaveBeenCalled();
+    ready = true;
+    await vi.advanceTimersByTimeAsync(32_000);
+    expect(fixture.children, 'a recovered client must not be replaced later either').toHaveLength(1);
+
+    // Genuinely unready: it keeps failing, and the next pass replaces it.
+    ready = false;
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(fixture.children).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(fixture.children, 'a client that stays unready is still replaced').toHaveLength(2);
+
+    await handle.stop();
+  });
+
   it('does not wait on a client that already died by signal before starting its replacement', async () => {
     vi.useFakeTimers();
     const reports: any[] = [];
@@ -169,7 +246,7 @@ describe('OpenAI tunnel process ownership', () => {
     await handle.stop();
   });
 
-  it('starts a replacement with no inherited health address, handshake, or outage verdict', async () => {
+  it.each(['unavailable', 'missing timestamp'])('starts a replacement with no inherited health and %s metrics', async missing => {
     vi.useFakeTimers();
     vi.setSystemTime(1_800_000_000_000);
     const reports: any[] = [];
@@ -178,7 +255,10 @@ describe('OpenAI tunnel process ownership', () => {
       const url = new URL(String(input));
       if (url.pathname === '/readyz') return new Response('ok');
       if (url.pathname === '/metrics') {
-        if (!metricsAvailable) throw new Error('metrics unavailable');
+        if (!metricsAvailable) {
+          if (missing === 'missing timestamp') return new Response('commands_poll_errors_total 0\n');
+          throw new Error('metrics unavailable');
+        }
         return new Response(
           `commands_poll_last_successful_timestamp_seconds ${Date.now() / 1000}\ncommands_poll_errors_total 0\n`
         );

@@ -107,22 +107,26 @@ const AUTH_FAILURE = /\b(401|403|unauthorized|invalid[_ ]api[_ ]key|invalid_requ
  * a local health check that stays green throughout an outage, because from its point
  * of view nothing local has failed.
  */
-const UNREACHABLE =
-  /poll (?:failed|timed out)|no such host|dial tcp|i\/o timeout|connection (was )?(aborted|refused|reset)|network is (unreachable|down)|no route to host|tls handshake timeout|temporary failure in name resolution|forcibly closed/i;
+const CONTROL_PLANE_POLL = /\bpoll (?:failed|timed out(?:;\s*backing off)?)\b/i;
+const UNREACHABLE_NETWORK =
+  /no such host|dial tcp|i\/o timeout|timed out|context deadline exceeded|connection (was )?(aborted|refused|reset)|network is (unreachable|down)|no route to host|tls handshake timeout|temporary failure in name resolution|forcibly closed/i;
 
 /** Turns a Go network error into something worth showing a person. */
 export function describeNetworkError(raw: string): string {
   if (/no such host|name resolution/i.test(raw)) return 'no internet connection';
   if (/connection (was )?(aborted|reset)|forcibly closed/i.test(raw)) return 'the connection dropped';
   if (/refused/i.test(raw)) return 'the connection was refused';
-  if (/timeout/i.test(raw)) return 'the connection timed out';
+  if (/timeout|timed out|context deadline exceeded/i.test(raw)) return 'the connection timed out';
   if (/network is (unreachable|down)|no route to host/i.test(raw)) return 'the network is unreachable';
   return 'a network error';
 }
 
 /** True when this machine can still resolve OpenAI's control plane. */
 export function isUnreachableError(raw: string): boolean {
-  return UNREACHABLE.test(raw);
+  const text = String(raw || '');
+  // A bare Go timeout can come from the local MCP startup probe too. Only the tunnel
+  // client's control-plane poll context is allowed to classify OpenAI as unreachable.
+  return CONTROL_PLANE_POLL.test(text) && UNREACHABLE_NETWORK.test(text);
 }
 
 export async function startTunnel(opts: TunnelStartOptions): Promise<TunnelHandle> {
@@ -164,6 +168,23 @@ const OFFLINE_RECHECK_MS = 5_000;
  * run has to outlive a full poll cycle before it counts.
  */
 const UNREACHABLE_CONFIRM_MS = 35_000;
+
+/**
+ * How long /readyz has to keep failing before the client is killed and replaced.
+ *
+ * The same reasoning as UNREACHABLE_CONFIRM_MS above, applied to the far more expensive
+ * action. That one governs a *caption*; this one governs terminating the process every live
+ * tool call is travelling through. A single missed probe used to be enough: /readyz is asked
+ * once, with a three-second timeout and no retry, and one `false` terminated the client. Any
+ * request in flight died with it, the model went on waiting for an answer that could no longer
+ * arrive, and the chat ended on ChatGPT's own "Message delivery timed out. Please try again."
+ *
+ * A probe can miss for reasons that are not a broken client — the client is mid-transfer, the
+ * machine is briefly loaded, the readiness check's own downstream probe is slow. Requiring the
+ * failure to survive into a second watch pass costs a genuinely dead client one extra interval
+ * before it is replaced, and costs a healthy one nothing at all.
+ */
+const UNREADY_CONFIRM_MS = 15_000;
 
 /** A run of unreachable complaints not yet contradicted by a completed poll. */
 export interface UnreachableRun {
@@ -252,6 +273,8 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     unreachableReason: string;
     outage: UnreachableRun;
     lastHandshake: number | null;
+    /** When /readyz first failed in the current run of failures; 0 when it is answering. */
+    unreadySince: number;
     pollErrors: number;
     healthBase: string | null;
     health: TunnelHealth | null;
@@ -425,9 +448,25 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
           const ready = await probe(`${run.healthBase}/readyz`);
           if (stopped || current !== run) return;
           if (!ready.ok) {
+            const now = Date.now();
+            if (run.unreadySince === 0) {
+              run.unreadySince = now;
+              logWarn(`${tag} did not answer its readiness check: ${ready.detail || 'no detail'} — rechecking before replacing it`);
+              watch(run);
+              return;
+            }
+            if (now - run.unreadySince < UNREADY_CONFIRM_MS) {
+              watch(run);
+              return;
+            }
             logWarn(`${tag} went unready: ${ready.detail}`);
             restart(run, ready.detail || 'The tunnel stopped responding.', true);
             return;
+          }
+          // Answered: whatever the earlier miss was, it was not this client being down.
+          if (run.unreadySince !== 0) {
+            logInfo(`${tag} answered its readiness check again; not replacing it`);
+            run.unreadySince = 0;
           }
 
           const read = await refreshHealth(run);
@@ -487,6 +526,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       unreachableReason: '',
       outage: NO_OUTAGE,
       lastHandshake: null,
+      unreadySince: 0,
       pollErrors: 0,
       healthBase: null,
       health: null,
@@ -527,7 +567,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
         if (level === 'ERROR' || level === 'FATAL' || level === 'WARN') {
           const errText = event['error'] ? String(event['error']) : '';
           run.lastError = `${level} ${message}${errText ? `: ${errText}` : ''}`.slice(0, 400);
-          if (isUnreachableError(message) || isUnreachableError(errText)) {
+          if (isUnreachableError(`${message}: ${errText}`)) {
             // Retry chatter. noteUnreachable logs one plain line per run rather than a
             // socket dump per attempt, and the state it leads to is decided in `watch`.
             noteUnreachable(run, errText || message);
@@ -610,6 +650,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     }
   };
 }
+
 
 async function readHealthUrl(file: string): Promise<string | null> {
   try {

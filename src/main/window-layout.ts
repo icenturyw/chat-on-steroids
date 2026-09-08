@@ -1,5 +1,5 @@
-/** User-facing 100% is the previous 130% size; IPC exposes relative zoom only. */
-export const UI_BASE_ZOOM = 1.3;
+/** User-facing 100% maps to Electron's native 100% zoom. IPC exposes relative zoom only. */
+export const UI_BASE_ZOOM = 1;
 
 export interface DisplayWorkArea {
   x: number;
@@ -22,6 +22,8 @@ export interface MainWindowLayout {
 
 const MIN_WIDTH = 640;
 const MIN_HEIGHT = 480;
+const DEFAULT_WIDTH = 1200;
+const DEFAULT_HEIGHT = 760;
 
 /**
  * BrowserWindow bounds and Electron screen work areas are both expressed in DIPs. Keep the
@@ -31,12 +33,14 @@ const MIN_HEIGHT = 480;
 export function windowLayoutForWorkArea(workArea: DisplayWorkArea): MainWindowLayout {
   const areaWidth = Math.max(1, Math.floor(workArea.width));
   const areaHeight = Math.max(1, Math.floor(workArea.height));
-  const width = areaWidth;
-  const height = areaHeight;
+  const width = Math.min(DEFAULT_WIDTH, areaWidth);
+  const height = Math.min(DEFAULT_HEIGHT, areaHeight);
+  const x = Math.round(workArea.x + (areaWidth - width) / 2);
+  const y = Math.round(workArea.y + (areaHeight - height) / 2);
 
   return {
-    x: Math.round(workArea.x),
-    y: Math.round(workArea.y),
+    x,
+    y,
     width,
     height,
     minWidth: Math.min(MIN_WIDTH, width),

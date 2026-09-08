@@ -22,6 +22,22 @@ const ZH_CN: Record<string, string> = {
   Connect: '连接',
   Disconnect: '断开连接',
   'Get it': '获取更新',
+  'Install update': '安装更新',
+  'Install now': '立即安装',
+  '← Back to chat': '← 返回会话',
+  'Back to chat': '返回会话',
+  'New chat': '新建会话',
+  'Settings navigation': '设置导航',
+  Workspace: '工作区',
+  Usage: '用量统计',
+  'YOUR ACTIVITY': '你的活动',
+  'Agents & automation': '代理与自动化',
+  Conversations: '会话',
+  Settings: '设置',
+  'Add a project folder': '添加项目文件夹',
+  'Zoom out': '缩小',
+  'Reset zoom': '重置缩放',
+  'Zoom in': '放大',
   Permissions: '权限',
   'Read-only': '只读',
   'Look at files': '查看文件',
@@ -37,7 +53,7 @@ const ZH_CN: Record<string, string> = {
   'Nothing shared yet. Press Add or drop a folder here. ChatGPT sees short names like':
     '尚未共享任何文件夹。点击“添加”或将文件夹拖到此处。ChatGPT 只会看到类似',
   '— your real system paths are never sent.': '— 系统中的真实路径绝不会发送出去。',
-  Health: '连接健康',
+  Health: '连接状态',
   'Run checks': '运行检查',
   'Checking…': '正在检查…',
   'verified link': '已验证链路',
@@ -54,8 +70,9 @@ const ZH_CN: Record<string, string> = {
   Refresh: '刷新',
   Copy: '复制',
   Home: '首页',
-  Setup: '设置',
+  Setup: '接入向导',
   Chat: '会话',
+  'Chat settings': '会话设置',
   'Show all steps': '显示全部步骤',
   'Hide finished steps': '隐藏已完成步骤',
   'Pick a folder to share': '选择要共享的文件夹',
@@ -73,6 +90,11 @@ const ZH_CN: Record<string, string> = {
   'Tunnel ID — Core connector': '隧道 ID — Core 连接器',
   'Tunnel ID — Desktop connector': '隧道 ID — Desktop 连接器',
   optional: '可选',
+  required: '必需',
+  'Not published': '未发布',
+  Problem: '异常',
+  Name: '名称',
+  Description: '说明',
   'Screen and mouse/keyboard control are a separate connector, so they need a second tunnel. Create another one and paste its ID here. Leave it empty to keep desktop control off in ChatGPT.':
     '屏幕与鼠标/键盘控制使用独立连接器，因此需要第二条隧道。再创建一条并将其 ID 粘贴到这里；留空则不会在 ChatGPT 中启用桌面控制。',
   'Create an API key': '创建 API 密钥',
@@ -185,6 +207,319 @@ const ZH_CN: Record<string, string> = {
   'Keep running in the tray when closed': '关闭窗口后在托盘继续运行',
   'Privacy screenshots: default to the active window instead of the whole monitor':
     '隐私截图：默认仅截取活动窗口，而非整个显示器',
+  'Start Chat On Steroids when I sign in': '登录系统时启动 Chat On Steroids',
+  'Developer mode: show turn boundaries and recovery events': '开发者模式：显示轮次边界和恢复事件',
+  'Model availability and the work recorded in this workspace.': '查看模型可用情况，以及此工作区记录的使用情况。',
+  'Calculating recorded tool usage…': '正在统计已记录的工具用量…',
+  'Updating…': '正在更新…',
+  'Usage could not be loaded. Try Refresh.': '无法加载用量数据，请点击“刷新”重试。',
+  'Token activity per day': '每日 Token 用量',
+  'Estimated context processed per tool call · last 52 weeks': '按工具调用估算的上下文处理量 · 最近 52 周',
+  'Cost estimate per day': '每日成本估算',
+  'Edit cost formula': '编辑成本公式',
+  'Automatic baselines use Standard short-context cached-input prices, checked 7 September 2026:':
+    '自动基准采用 Standard 短上下文的缓存输入价格，核对日期为 2026 年 9 月 7 日：',
+  'These are editable cost comparisons, not actual bills.': '这些数值仅用于可编辑的成本对比，并非实际账单。',
+  'Context times unique tool calls, divided by': '上下文 × 去重后的工具调用次数，再除以',
+  'Changes estimated tokens and costs.': '用于调整 Token 与成本估算。',
+  'Usage token divisor': '用量 Token 除数',
+  'Cached-input cost multiplier': '缓存输入成本倍数',
+  "Applied after each model's cached-input rate.": '在各模型缓存输入单价之后应用。',
+  'Set per-model cached-input rates to compare costs.': '设置各模型的缓存输入单价以比较成本。',
+  'Remaining usage per model': '各模型剩余用量',
+  'Reported by ChatGPT. Shared pools and feature quotas are listed separately. Missing data means not reported.':
+    '数据由 ChatGPT 提供。共享额度池和功能额度会单独列出；缺失数据表示 ChatGPT 未提供。',
+  'Processed tokens · est.': '已处理 Token · 估算',
+  'Peak daily tokens': '单日 Token 峰值',
+  'Active days': '活跃天数',
+  'Not reported by ChatGPT': 'ChatGPT 未提供',
+  'Shared usage pool': '共享用量池',
+  'Feature quota': '功能额度',
+  'Refresh needed': '需要刷新',
+  'Not reported': '未提供',
+  Weekly: '每周',
+  'Reset not reported': '未提供重置时间',
+  'ChatGPT has not reported per-model message balances. Shared usage and feature quotas do not establish a model-specific balance.':
+    'ChatGPT 尚未提供各模型的消息余额。共享用量和功能额度不能用于推断某个模型的独立余额。',
+  'Estimated equivalent · USD': '估算等值成本 · USD',
+  'Recorded model attribution; missing history assumes GPT-5.6 High. Unchanged recordings reuse saved totals.':
+    '按已记录的模型归属统计；缺失历史按 GPT-5.6 High 估算。未变化的记录会复用已保存的汇总值。',
+  'USD / 1M cached input · editable official baseline, checked 7 September 2026':
+    'USD / 百万缓存输入 Token · 可编辑官方基准，核对于 2026 年 9 月 7 日',
+  'USD / 1M cached input · enter a verified comparison rate': 'USD / 百万缓存输入 Token · 请输入已核实的对比单价',
+  'Unknown rate': '未知单价',
+  'Final frontend context': '最终前端上下文',
+  'Recorded model / effort': '记录的模型 / 推理强度',
+  'Estimated tokens': '估算 Token',
+  'Estimated equivalent': '估算等值成本',
+  'effort unknown': '推理强度未知',
+  assumed: '估算',
+  'Rate unknown': '单价未知',
+  Day: '日期',
+  'No recorded tool calls yet.': '尚无已记录的工具调用。',
+  'Deep research': '深度研究',
+  'File uploads': '文件上传',
+  'Pasted text files': '粘贴文本文件',
+  'Image generation': '图像生成',
+  'Choose what ChatGPT can access and keep your connection healthy.': '管理 ChatGPT 可访问的内容，并查看连接状态。',
+  'ChatGPT ran a tool': 'ChatGPT 工具调用',
+  'Local server': '本地服务器',
+  'Poll errors': '轮询错误',
+  'Tunnel → this app': '隧道 → 本应用',
+  'Tunnel uptime': '隧道运行时长',
+  'Tunnel client': '隧道客户端',
+  'starting…': '正在启动…',
+  'checking…': '正在检查…',
+  'never — check Developer mode': '从未调用 — 请检查开发者模式',
+  'Connect your workspace to ChatGPT.': '将此工作区连接到 ChatGPT。',
+  'Before you start: choose “Allow all actions”': '开始前：选择“允许所有操作”',
+  'In ChatGPT, open Settings → Plugins (or Apps), select this plugin, and set its action permissions to':
+    '在 ChatGPT 中打开“设置 → 插件（或应用）”，选择此插件，并将操作权限设置为',
+  'Allow all actions': '允许所有操作',
+  '. Repeat for the Desktop plugin if you added it.': '。如果添加了 Desktop 插件，也请重复此操作。',
+  'This lets ChatGPT use the plugin without asking for each action. Otherwise, approval prompts can pause Goal, Loop and agent tasks. Your folder and tool permissions in this app still apply.':
+    '这样 ChatGPT 使用插件时无需逐次确认操作。否则，审批提示可能会中断目标、循环和代理任务；本应用中的文件夹与工具权限仍然有效。',
+  'What would you like to build?': '你想构建什么？',
+  'Fine-tune your workspace and the way your agents work.': '调整工作区，以及代理的工作方式。',
+  'Search settings': '搜索设置',
+  'Search settings…': '搜索设置…',
+  'No settings match your search.': '没有匹配的设置。',
+  'Continuation sources': '续写来源',
+  'Goal response source': '目标响应来源',
+  'API is the most reliable. Offline uses completion markers and 200 prepared messages.':
+    'API 最可靠；离线模式使用完成标记和预生成消息。',
+  'API key · Most reliable': 'API 密钥 · 最可靠',
+  'Separate ChatGPT chat': '独立 ChatGPT 会话',
+  'Offline · No API cost': '离线 · 无 API 成本',
+  'Loop response source': '循环响应来源',
+  'Loop keeps going until you switch it off.': '循环会持续运行，直到你手动关闭。',
+  'Goal, Loop and Plan model': '目标、循环与计划模型',
+  'Model for ChatGPT-generated messages and plans. Select GPT-5.6 and High below for planning.':
+    '用于 ChatGPT 生成消息和计划的模型。规划任务建议在下方选择 GPT-5.6 和 High。',
+  'Goal, Loop and Plan reasoning': '目标、循环与计划推理强度',
+  'Used with the ChatGPT model above; independent from API reasoning.': '与上方 ChatGPT 模型配合使用；独立于 API 推理设置。',
+  'Include tool details in Goal and handoffs': '在目标和交接中包含工具详情',
+  'Goal receives recorded tool arguments and results. Handoff briefs retain tool details.':
+    '目标会读取已记录的工具参数和结果；交接摘要会保留工具详情。',
+  'Keep the turn open': '保持当前轮次',
+  'Plan generation': '计划生成',
+  'Create staged tasks. ChatGPT uses the Goal, Loop and Plan model above; API uses the model and reasoning in API provider settings.':
+    '将任务拆分为多个阶段。ChatGPT 使用上方的目标、循环与计划模型；API 使用“API 提供商”中的模型和推理设置。',
+  'API provider': 'API 提供商',
+  'Session finish': 'Session Finish',
+  'Ask Astra to keep the turn open for your next instruction. With Automatic plugin refresh enabled, tool changes refresh the connector after 20 seconds.':
+    '让 Astra 保持当前轮次以等待你的下一条指令。开启自动插件刷新后，工具变更会在 20 秒后刷新连接器。',
+  'When ChatGPT is wrapping up': 'ChatGPT 即将结束回答时',
+  'Automatic follow-ups use your Loop instructions and selected Loop source.': '自动跟进会使用你的循环指令和所选循环来源。',
+  'Notify me · Write or Generate Goal': '通知我 · 编写或生成目标',
+  'Generate and inject Goal': '生成并注入目标',
+  'Requested notice': '提前提醒',
+  'A request to the model, not a guaranteed countdown.': '这是向模型提出的请求，并非精确倒计时。',
+  '3 minutes': '3 分钟',
+  '5 minutes': '5 分钟',
+  'Connector instructions': '连接器指令',
+  'Your own instructions': '自定义指令',
+  'e.g. Always run the test suite before saying a change works.': '例如：确认修改有效前，始终先运行测试套件。',
+  'Added to the end of what each connector tells ChatGPT about itself, marked as yours. Kept across app updates. Leave empty for none.':
+    '附加到每个连接器提供给 ChatGPT 的说明末尾，并标记为你的指令。应用更新后仍会保留；留空表示不添加。',
+  'ChatGPT reads connector instructions once, when it loads the tools, so a change reaches an existing conversation only after the connector is loaded again.':
+    'ChatGPT 只会在加载工具时读取一次连接器指令，因此修改后需要重新加载连接器，现有会话才能获取新指令。',
+  'ChatGPT models': 'ChatGPT 模型',
+  'Available ChatGPT models': '可用的 ChatGPT 模型',
+  'Read model choices from your account.': '从你的账号读取可选模型。',
+  'Default sub-agent model': '默认子代理模型',
+  'Confirmed in ChatGPT before a worker starts.': '工作器启动前会在 ChatGPT 中确认。',
+  'Default sub-agent reasoning': '默认子代理推理强度',
+  'Selected independently from the model.': '与模型独立选择。',
+  'No observed choices': '尚未发现可选项',
+  'Browser & history': '浏览器与历史记录',
+  'ChatGPT browser': 'ChatGPT 浏览器',
+  "Used when the app launches a browser. Install the companion and sign in to ChatGPT in this browser's active profile. Already connected tabs stay in their browser.":
+    '应用需要启动浏览器时使用。请安装配套扩展，并在该浏览器当前配置文件中登录 ChatGPT；已连接的标签页会继续留在原浏览器中。',
+  'Background chats': '后台会话',
+  'Keep app-created ChatGPT tabs in the background.': '让应用创建的 ChatGPT 标签页保持在后台。',
+  'Automatic plugin refresh': '自动刷新插件',
+  'Let the companion refresh changed connector tools in ChatGPT. Off by default; manual refresh remains available in ChatGPT.':
+    '允许配套扩展在 ChatGPT 中刷新发生变化的连接器工具。默认关闭；仍可在 ChatGPT 中手动刷新。',
+  'Browser only': '仅浏览器模式',
+  'Do not open tabs for automatic plugin refresh or chat recovery. Explicit new chats, workers and Reload models still work.':
+    '自动刷新插件或恢复会话时不主动打开标签页；手动新建会话、工作器和“重新加载模型”仍可使用。',
+  'Idle app-created tabs close after two minutes. Sleeping worker tabs can close earlier when the worker limit is exceeded. Active turns and unsent drafts stay open.':
+    '应用创建的空闲标签页会在两分钟后关闭；超过工作器上限时，休眠工作器标签页可能更早关闭。活跃轮次和未发送草稿不会关闭。',
+  'Overwrite ChatGPT tool rows': '覆盖 ChatGPT 工具记录行',
+  'Show recorded local activity in the ChatGPT page.': '在 ChatGPT 页面显示本地记录的活动。',
+  'Show durations in ChatGPT': '在 ChatGPT 中显示耗时',
+  'Uses the same preference as the extension popup.': '与扩展弹窗使用相同设置。',
+  'Browser preferences': '浏览器偏好设置',
+  "Refresh to read the browser's current preferences.": '点击刷新以读取浏览器当前偏好设置。',
+  'Refresh browser preferences': '刷新浏览器偏好设置',
+  'Waiting for the extension to confirm…': '正在等待扩展确认…',
+  'Confirmed by the browser extension.': '浏览器扩展已确认。',
+  'Unable to reach the extension. Connect it and refresh.': '无法连接浏览器扩展，请先连接后再刷新。',
+  Provider: '提供商',
+  'OpenRouter, or your own OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, a gateway) for the API response source.':
+    'API 响应来源可使用 OpenRouter，或你自己的 OpenAI 兼容端点（Ollama、vLLM、LM Studio、网关等）。',
+  'Custom endpoint': '自定义端点',
+  'Endpoint base URL': '端点基础 URL',
+  'https, or http on localhost.': '支持 https，localhost 可使用 http。',
+  'are called under it.': '会在该地址下调用。',
+  "Your endpoint's own model id, typed exactly as it serves it.": '请输入端点实际提供的模型 ID，需完全一致。',
+  'Endpoint API key (optional)': '端点 API 密钥（可选）',
+  'leave empty for a keyless local server': '无密钥的本地服务器请留空',
+  'Continuation prompts': '续写提示词',
+  'Reads the goal from your messages and stops when it is complete.': '从你的消息中读取目标，并在目标完成后停止。',
+  'Uses the objective saved in the chat controls. Stops when every requirement is met.': '使用会话控制中保存的目标，满足全部要求后停止。',
+  'Writes the next instruction after each answer, until you turn Loop off.': '每次回答后生成下一条指令，直到你关闭循环。',
+  'Workers & recovery': '工作器与恢复',
+  'Restore missing or unresponsive work chats. Goal and Loop chats recover automatically.': '恢复缺失或无响应的工作会话；目标和循环会话会自动恢复。',
+  'Browse folders': '浏览文件夹',
+  'Search files': '搜索文件',
+  'Read files': '读取文件',
+  'File metadata': '文件元数据',
+  'Create files': '创建文件',
+  'Edit files': '编辑文件',
+  'Move / rename': '移动 / 重命名',
+  'Delete files': '删除文件',
+  'Run commands': '运行命令',
+  'Save ChatGPT files': '保存 ChatGPT 文件',
+  'See the screen': '查看屏幕',
+  'Control mouse and keyboard': '控制鼠标和键盘',
+  'Read clipboard': '读取剪贴板',
+  'Write clipboard': '写入剪贴板',
+  'List what is inside an approved folder.': '列出已批准文件夹中的内容。',
+  'Find files by name or glob, and text inside them.': '按名称或 glob 查找文件，并搜索文件内文本。',
+  'Read text in ranges, and open local images into vision.': '按范围读取文本，并将本地图像打开供视觉模型查看。',
+  'Size, dates and line count, without the contents.': '查看大小、日期和行数，不读取文件内容。',
+  'Add new files, and the folders they need.': '创建新文件及其所需文件夹。',
+  'Exact edits, applied atomically across files.': '执行精确修改，并跨文件原子应用。',
+  'Move or rename, both ends inside approved folders.': '移动或重命名；源和目标都必须位于已批准文件夹内。',
+  'Permanent — there is no Recycle Bin.': '永久删除 — 不会进入回收站。',
+  'Run anything as you. NOT limited to approved folders.': '以你的身份运行任意命令；不受已批准文件夹范围限制。',
+  'Save images and files ChatGPT generates into an approved folder.': '将 ChatGPT 生成的图像和文件保存到已批准文件夹。',
+  'Screenshots, open windows, and the controls on them.': '获取屏幕截图、打开的窗口及其中的控件。',
+  'Moves the pointer, clicks, types and presses keys, as you.': '以你的身份移动指针、点击、输入和按键。',
+  'Read the current clipboard text.': '读取当前剪贴板文本。',
+  'Replace the clipboard without focus or keystrokes.': '无需切换焦点或模拟按键即可替换剪贴板内容。',
+  'Record this chat locally, and expose the session tool in ChatGPT': '在本地记录此会话，并在 ChatGPT 中公开 session 工具',
+  'Expose or hide the sub-agent tools in ChatGPT': '在 ChatGPT 中显示或隐藏子代理工具',
+  'List recent recordings or find past and concurrent work by text.': '列出最近记录，或通过文本查找过去及并行进行的工作。',
+  'Read one explicit recording, continue it, or expand one short T… tool reference.': '读取指定记录、继续读取，或展开一个简短的 T… 工具引用。',
+  'Open worker ChatGPT conversations for parts of the task, on one shared context.': '为任务的不同部分打开工作器 ChatGPT 会话，并共享同一上下文。',
+  'Steer one worker or several at once, or report back to prime.': '指导一个或多个工作器，或向主代理汇报。',
+  'See every worker, and collect messages not yet delivered on a tool result.': '查看所有工作器，并收集尚未随工具结果送达的消息。',
+  'Hand the worker result back to prime and close that slot.': '将工作器结果交回主代理，并释放该工作器槽位。',
+  'off in read-only mode': '只读模式下已关闭',
+  'What should this chat achieve?': '这个会话要完成什么？',
+  'What should each continuation focus on?': '每次续写应重点关注什么？',
+  'Ask anything…': '输入任何问题…',
+  'Message ChatGPT': '给 ChatGPT 发消息',
+  'Add attachments': '添加附件',
+  'Add photos & files': '添加图片和文件',
+  'Share a folder': '共享文件夹',
+  'Chat options': '会话选项',
+  'Chat mode': '会话模式',
+  Off: '关闭',
+  'Chat automation': '会话自动化',
+  "This chat's goal": '此会话的目标',
+  'Save task': '保存任务',
+  'Goal behavior': '目标行为',
+  'Goal · stop when complete': '目标 · 完成后停止',
+  'Loop · keep going': '循环 · 持续运行',
+  'Create plan': '创建计划',
+  'Cancel plan': '取消计划',
+  'Queue at Session finish': '在 Session Finish 时排队',
+  'Compact & resume': '压缩并续聊',
+  'Cancel compaction': '取消压缩',
+  'Estimated session context': '估算的会话上下文',
+  'Session context · estimated': '会话上下文 · 估算',
+  'Auto-compaction off for Pro': 'Pro 已关闭自动压缩',
+  'Auto-compaction off': '自动压缩已关闭',
+  'Choose a level': '选择档位',
+  'Observed models': '已发现模型',
+  'Reload ChatGPT models': '重新加载 ChatGPT 模型',
+  'Thinking effort': '思考强度',
+  'ChatGPT model': 'ChatGPT 模型',
+  'Reasoning effort': '推理强度',
+  'Generate Goal': '生成目标',
+  'Message delivery': '消息投递方式',
+  'Inject now': '立即注入',
+  'After this turn': '当前轮次结束后',
+  Send: '发送',
+  'Send message': '发送消息',
+  'Stop requested': '已请求停止',
+  'Stop turn': '停止当前轮次',
+  'Cancel delivery': '取消投递',
+  'Send first stage': '发送第一阶段',
+  'Pursuing goal': '正在执行目标',
+  'Pause automation': '暂停自动化',
+  'Edit task': '编辑任务',
+  'Describe the task to turn into a plan…': '描述任务，以便生成计划…',
+  'Creating plan…': '正在创建计划…',
+  'Plan cancelled': '计划已取消',
+  'Preparing plan…': '正在准备计划…',
+  'Plan ready': '计划已就绪',
+  'Plan failed': '计划生成失败',
+  'Writing plan…': '正在编写计划…',
+  'The planner response could not be read.': '无法解析规划器返回的内容。',
+  'Send again to retry, or cancel the plan.': '请再次发送以重试，或取消该计划。',
+  'Your draft changed; generate a plan from the updated task.': '草稿已发生变化，请根据更新后的任务重新生成计划。',
+  'Enter text or delete this stage.': '请输入内容，或删除此阶段。',
+  'Saving…': '正在保存…',
+  Saved: '已保存',
+  'Loop instructions': '循环指令',
+  'This sub-agent is managed by its prime.': '此子代理由主代理管理。',
+  'This chat is blocked.': '此会话已被阻止。',
+  'Compaction is running in ChatGPT.': 'ChatGPT 正在执行上下文压缩。',
+  'Image': '图片',
+  'File': '文件',
+  'Delete this recorded session': '删除此会话记录',
+  'Open this chat in Chrome': '在 Chrome 中打开此会话',
+  'Sub-agent history': '子代理历史',
+  'Unavailable project': '项目不可用',
+  'New chat in this project': '在此项目中新建会话',
+  'Show more': '显示更多',
+  'Unattributed activity': '未归属活动',
+  'Recording is off': '会话记录已关闭',
+  'scroll for older history': '向下滚动查看更多历史记录',
+  opening: '正在打开',
+  active: '活动中',
+  'no tab': '无标签页',
+  sleeping: '休眠中',
+  waking: '正在唤醒',
+  finished: '已完成',
+  failed: '失败',
+  blocked: '已阻止',
+  'not a chat': '非会话活动',
+  resumed: '已恢复',
+  prime: '主代理',
+  worker: '工作器',
+  'Back to sub-agents': '返回子代理列表',
+  'Close sub-agents': '关闭子代理面板',
+  Active: '活动中',
+  History: '历史记录',
+  'No active sub-agents': '没有活动中的子代理',
+  'No recorded sub-agents': '没有已记录的子代理',
+  'Loading conversation…': '正在加载会话…',
+  'Conversation unavailable': '会话不可用',
+  'Open full chat': '打开完整会话',
+  'Toggle sub-agent side panel': '切换子代理侧边栏',
+  'Instant': '即时',
+  'Extra high': '超高',
+  Max: '最高',
+  Ultra: '极高',
+  Pro: 'Pro',
+  'Loading models…': '正在加载模型…',
+  'Models unavailable': '模型不可用',
+  'Reading your ChatGPT account': '正在读取你的 ChatGPT 账号',
+  'Reload models': '重新加载模型',
+  'Previous selection unavailable': '之前的选择已不可用',
+  'Choose an available model and effort': '请选择可用模型和推理强度',
+  'Model and thinking effort': '模型与思考强度',
+  'Reading your account’s model choices…': '正在读取你账号中的模型选项…',
+  'Connect to ChatGPT to load your models.': '请连接 ChatGPT 以加载模型。',
+  'Models unavailable · retry discovery': '模型不可用 · 请重新发现',
+  'Reading ChatGPT models': '正在读取 ChatGPT 模型',
+  'release date not published': '未公布发布日期',
   'No session selected': '未选择会话',
   'Untitled session': '未命名会话',
   Sessions: '会话',
@@ -285,7 +620,10 @@ const ZH_CN: Record<string, string> = {
   on: '开启'
 };
 
-const SKIP = '#timeline, #handoffBox, .feed, textarea, pre, code, script, style, [data-i18n-ignore]';
+// Never translate recorded/user-authored payloads. Textarea *values* are payloads too, but
+// their placeholder/title/aria text is renderer chrome and should still be localised.
+const TEXT_SKIP = '#timeline, #handoffBox, .feed, textarea, pre, code, script, style, [data-i18n-ignore]';
+const ATTRIBUTE_SKIP = '#timeline, #handoffBox, .feed, pre, code, script, style, [data-i18n-ignore]';
 
 export function isSimplifiedChineseLocale(locale: string): boolean {
   const normalized = locale.replace('_', '-').toLowerCase();
@@ -299,6 +637,8 @@ export function translateUiText(value: string): string {
   if (exact) return exact;
   let match = /^(\d+) permissions?$/.exec(normalized);
   if (match) return `${match[1]} 项权限`;
+  match = /^(\d+) of (\d+) permissions$/.exec(normalized);
+  if (match) return `已启用 ${match[1]} / ${match[2]} 项权限`;
   match = /^(\d+) problems?$/.exec(normalized);
   if (match) return `${match[1]} 个问题`;
   match = /^(\d+)\s+total\s+·\s+(\d+)\s+folders?$/.exec(normalized);
@@ -307,6 +647,14 @@ export function translateUiText(value: string): string {
   if (match) return `${match[1]} 条消息 · ${match[2]} 次工具调用`;
   match = /^(\d+) retained sessions? · (one|\d+) live now$/.exec(normalized);
   if (match) return `保留 ${match[1]} 个会话 · 当前 ${match[2] === 'one' ? '1' : match[2]} 个活动`;
+  match = /^(\d+) retained sessions?$/.exec(normalized);
+  if (match) return `保留 ${match[1]} 个会话`;
+  match = /^(\d+) of (\d+) retained sessions? shown$/.exec(normalized);
+  if (match) return `已显示 ${match[1]} / ${match[2]} 个保留会话`;
+  match = /^Recording is off · (.+)$/.exec(normalized);
+  if (match) return `会话记录已关闭 · ${translateUiText(match[1] ?? '')}`;
+  match = /^(.+) · scroll for older history$/.exec(normalized);
+  if (match) return `${translateUiText(match[1] ?? '')} · 向下滚动查看更多历史记录`;
   match = /^(\d+)(s|m|h|d) ago$/.exec(normalized);
   if (match) {
     const unit = { s: '秒', m: '分钟', h: '小时', d: '天' }[match[2] as 's' | 'm' | 'h' | 'd'];
@@ -316,8 +664,18 @@ export function translateUiText(value: string): string {
   if (match) return `ChatGPT 已连接到本应用：${translateUiText(match[1] ?? '')}`;
   match = /^Tools: (.+)$/.exec(normalized);
   if (match) return `工具：${match[1]}`;
+  match = /^Turn everything in "(.+)" on or off$/.exec(normalized);
+  if (match) return `开启或关闭“${translateUiText(match[1] ?? '')}”中的全部权限`;
   match = /^Connected\. Listening on (.+) · last message just now\.$/.exec(normalized);
   if (match) return `已连接。正在监听 ${match[1]} · 刚刚收到消息。`;
+  match = /^Connected\. Listening on (.+) · last message (.+)\.$/.exec(normalized);
+  if (match) return `已连接。正在监听 ${match[1]} · 最后消息：${translateUiText(match[2] ?? '')}。`;
+  match = /^Authorized, but the browser extension is not currently connected\. (.+)$/.exec(normalized);
+  if (match) return `浏览器扩展已授权，但当前未连接。${translateUiText(match[1] ?? '')}`;
+  match = /^Last seen (.+)\.$/.exec(normalized);
+  if (match) return `最后连接：${translateUiText(match[1] ?? '')}。`;
+  match = /^Listening on (.+) · no browser is authorized or connected yet\.$/.exec(normalized);
+  if (match) return `正在监听 ${match[1]} · 尚无已授权或已连接的浏览器。`;
   match = /^Extension folder: (.+)$/.exec(normalized);
   if (match) return `扩展目录：${match[1]}`;
   match = /^Rename (\/.+)$/.exec(normalized);
@@ -328,6 +686,80 @@ export function translateUiText(value: string): string {
   if (match) return `正在显示最新 ${match[1]} 个，共 ${match[2]} 个；按发布时间从新到旧排列。`;
   match = /^Goal model set to (.+)$/.exec(normalized);
   if (match) return `目标模型已设置为 ${match[1]}`;
+  match = /^(\d+) sub-agents · (\d+) active$/.exec(normalized);
+  if (match) return `${match[1]} 个子代理 · ${match[2]} 个活动中`;
+  match = /^(Collapse|Expand) (\d+) sub-agents$/.exec(normalized);
+  if (match) return `${match[1] === 'Collapse' ? '折叠' : '展开'} ${match[2]} 个子代理`;
+  match = /^Sub-agents · (\d+) recorded$/.exec(normalized);
+  if (match) return `子代理 · 已记录 ${match[1]} 个`;
+  match = /^Sub-agent history · (\d+)$/.exec(normalized);
+  if (match) return `子代理历史 · ${match[1]} 个`;
+  match = /^Unattributed activity · (\d+)$/.exec(normalized);
+  if (match) return `未归属活动 · ${match[1]} 项`;
+  match = /^Show more tasks in (.+)$/.exec(normalized);
+  if (match) return `显示“${match[1]}”中的更多任务`;
+  match = /^Remove (.+)$/.exec(normalized);
+  if (match) return `移除 ${match[1]}`;
+  match = /^Stage (\d+)$/.exec(normalized);
+  if (match) return `阶段 ${match[1]}`;
+  match = /^Edit stage (\d+)$/.exec(normalized);
+  if (match) return `编辑阶段 ${match[1]}`;
+  match = /^Delete stage (\d+)$/.exec(normalized);
+  if (match) return `删除阶段 ${match[1]}`;
+  match = /^Message in (.+)…$/.exec(normalized);
+  if (match) return `在 ${match[1]} 中发送消息…`;
+  match = /^(\d+) tokens used$/.exec(normalized);
+  if (match) return `已使用 ${match[1]} Token`;
+  match = /^(\d+)\/(\d+) tokens · (\d+)% of configured limit$/.exec(normalized);
+  if (match) return `${match[1]}/${match[2]} Token · 已使用配置上限的 ${match[3]}%`;
+  match = /^Auto-compaction at (\d+) tokens$/.exec(normalized);
+  if (match) return `达到 ${match[1]} Token 时自动压缩`;
+  match = /^Available in your ChatGPT account · checked (.+)$/.exec(normalized);
+  if (match) return `你的 ChatGPT 账号可用 · 检查于 ${match[1]}`;
+  match = /^(.+) · not verified$/.exec(normalized);
+  if (match) return `${match[1]} · 未验证`;
+  match = /^Provider busy · retry (\d*)(?: at (.+))?$/.exec(normalized);
+  if (match) return `提供商繁忙 · 第 ${match[1] || '?'} 次重试${match[2] ? `，时间 ${match[2]}` : ''}`;
+  match = /^(\d+(?:\.\d+)?)% remaining$/.exec(normalized);
+  if (match) return `剩余 ${match[1]}%`;
+  match = /^(.+) remaining$/.exec(normalized);
+  if (match && /^[\d.,]+$/.test(match[1] ?? '')) return `剩余 ${match[1]}`;
+  match = /^(\d+)h window · (.+)$/.exec(normalized);
+  if (match) return `${match[1]} 小时窗口 · ${translateUiText(match[2] ?? '')}`;
+  match = /^Weekly · (.+)$/.exec(normalized);
+  if (match) return `每周 · ${translateUiText(match[1] ?? '')}`;
+  match = /^Resets (.+)$/.exec(normalized);
+  if (match) return `重置于 ${match[1]}`;
+  match = /^(.+) cached-input USD per million tokens$/.exec(normalized);
+  if (match) return `${match[1]} 缓存输入单价（USD / 百万 Token）`;
+  match = /^(.+): ([\d.,]+) estimated tokens$/.exec(normalized);
+  if (match) return `${match[1]}：估算 ${match[2]} Token`;
+  match = /^(.+) estimated tokens; (.+) have no comparison rate\. Cached-input equivalent, not a bill\.$/.exec(normalized);
+  if (match) return `估算 ${match[1]} Token；其中 ${match[2]} 没有对比单价。按缓存输入等值估算，并非账单。`;
+  match = /^(.+) estimated equivalent\. (.+) tokens have no rate\. This is a comparison, not a bill\.$/.exec(normalized);
+  if (match) return `估算等值成本 ${match[1]}。其中 ${match[2]} Token 没有单价；仅用于对比，并非账单。`;
+  match = /^\+ (.+) unpriced$/.exec(normalized);
+  if (match) return `+ ${match[1]} 未计价`;
+  match = /^Cached × (.+)$/.exec(normalized);
+  if (match) return `缓存输入 × ${match[1]}`;
+  match = /^(.+): (\d+(?:\.\d+)?)% remaining$/.exec(normalized);
+  if (match) return `${match[1]}：剩余 ${match[2]}%`;
+  match = /^Final frontend context × unique tool calls ÷ (.+) × each model’s cached-input rate ÷ 1M × (.+)\.$/.exec(normalized);
+  if (match) return `最终前端上下文 × 去重工具调用次数 ÷ ${match[1]} × 各模型缓存输入单价 ÷ 100 万 × ${match[2]}。`;
+  match = /^ChatGPT ran a tool (.+) — the whole chain works\.$/.exec(normalized);
+  if (match) return `ChatGPT 于${translateUiText(match[1] ?? '')}调用了工具 — 整条链路工作正常。`;
+  match = /^ChatGPT connected (.+) but has not run one of its tools yet\.$/.exec(normalized);
+  if (match) return `ChatGPT 于${translateUiText(match[1] ?? '')}连接，但尚未调用此连接器的工具。`;
+  match = /^ChatGPT ran one of its tools (.+)\.$/.exec(normalized);
+  if (match) return `ChatGPT 于${translateUiText(match[1] ?? '')}调用了此连接器的工具。`;
+  match = /^verified (.+)$/.exec(normalized);
+  if (match) return `已验证 · ${translateUiText(match[1] ?? '')}`;
+  match = /^Using (.+)$/.exec(normalized);
+  if (match) return `正在使用 ${match[1]}`;
+  match = /^Screen Recording: (.+)$/.exec(normalized);
+  if (match) return `屏幕录制：${translateUiText(match[1] ?? '')}`;
+  match = /^Accessibility: (.+)$/.exec(normalized);
+  if (match) return `辅助功能：${translateUiText(match[1] ?? '')}`;
   match = /^(\d+) characters · from (\d+) events \(~([^)]*) tokens\) · (.+)$/.exec(normalized);
   if (match) return `${match[1]} 个字符 · 来自 ${match[2]} 个事件（约 ${match[3]} Token）· ${match[4]}`;
   return value;
@@ -335,7 +767,7 @@ export function translateUiText(value: string): string {
 
 function localizeTextNode(node: Text): void {
   const parent = node.parentElement;
-  if (!parent || parent.closest(SKIP)) return;
+  if (!parent || parent.closest(TEXT_SKIP)) return;
   const match = /^(\s*)(.*?)(\s*)$/s.exec(node.data);
   if (!match) return;
   const source = match[2] ?? '';
@@ -347,7 +779,7 @@ function localizeElement(root: ParentNode): void {
   const view = document.defaultView;
   if (!view) return;
   const owner = root instanceof view.Element ? root : null;
-  if (owner?.closest(SKIP)) return;
+  if (owner?.closest(ATTRIBUTE_SKIP)) return;
   const walker = document.createTreeWalker(root, view.NodeFilter.SHOW_TEXT);
   let node: Node | null;
   while ((node = walker.nextNode())) localizeTextNode(node as Text);
@@ -356,7 +788,7 @@ function localizeElement(root: ParentNode): void {
     ...Array.from(root.querySelectorAll<HTMLElement>('[title], [aria-label], [placeholder]'))
   ];
   for (const element of elements) {
-    if (element.closest(SKIP)) continue;
+    if (element.closest(ATTRIBUTE_SKIP)) continue;
     for (const attribute of ['title', 'aria-label', 'placeholder']) {
       const value = element.getAttribute(attribute);
       if (!value) continue;
@@ -378,6 +810,7 @@ export function installUiLocale(
     for (const record of records) {
       if (record.type === 'characterData') localizeTextNode(record.target as Text);
       if (record.type === 'attributes' && record.target instanceof view.Element) {
+        if (record.target.closest(ATTRIBUTE_SKIP)) continue;
         const attribute = record.attributeName;
         if (attribute && ['title', 'aria-label', 'placeholder'].includes(attribute)) {
           const value = record.target.getAttribute(attribute);

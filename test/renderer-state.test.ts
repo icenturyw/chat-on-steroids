@@ -3,7 +3,7 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_MODEL, DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
-import { isSimplifiedChineseLocale, translateUiText } from '../src/renderer/i18n.js';
+import { installUiLocale, isSimplifiedChineseLocale, translateUiText } from '../src/renderer/i18n.js';
 
 it('selects Simplified Chinese without changing Traditional Chinese locales', () => {
   expect(isSimplifiedChineseLocale('zh-CN')).toBe(true);
@@ -15,7 +15,14 @@ it('selects Simplified Chinese without changing Traditional Chinese locales', ()
 });
 
 it('translates fixed and counted renderer chrome into Simplified Chinese', () => {
-  expect(translateUiText('Setup')).toBe('设置');
+  expect(translateUiText('Setup')).toBe('接入向导');
+  expect(translateUiText('Workspace')).toBe('工作区');
+  expect(translateUiText('Usage')).toBe('用量统计');
+  expect(translateUiText('Agents & automation')).toBe('代理与自动化');
+  expect(translateUiText('Processed tokens · est.')).toBe('已处理 Token · 估算');
+  expect(translateUiText('82% remaining')).toBe('剩余 82%');
+  expect(translateUiText('6 of 9 permissions')).toBe('已启用 6 / 9 项权限');
+  expect(translateUiText('3 sub-agents · 2 active')).toBe('3 个子代理 · 2 个活动中');
   expect(translateUiText('no handshake yet')).toBe('尚未完成握手');
   expect(translateUiText('just now')).toBe('刚刚');
   expect(translateUiText('now')).toBe('刚刚');
@@ -47,6 +54,29 @@ afterEach(() => {
   dom?.window.close();
   dom = null;
   vi.resetModules();
+});
+
+it('localises textarea chrome without translating the user-authored value', () => {
+  dom = new JSDOM('<body><textarea placeholder="Ask anything…">Usage</textarea><pre title="Usage">Usage</pre></body>', {
+    url: 'https://local.test/'
+  });
+  const w = dom.window;
+  Object.assign(globalThis, {
+    window: w,
+    document: w.document,
+    HTMLElement: w.HTMLElement,
+    Element: w.Element,
+    Node: w.Node,
+    DocumentFragment: w.DocumentFragment,
+    MutationObserver: w.MutationObserver
+  });
+  installUiLocale(['zh-CN']);
+  const textarea = w.document.querySelector('textarea')!;
+  expect(textarea.getAttribute('placeholder')).toBe('输入任何问题…');
+  expect(textarea.textContent).toBe('Usage');
+  const pre = w.document.querySelector('pre')!;
+  expect(pre.textContent).toBe('Usage');
+  expect(pre.getAttribute('title')).toBe('Usage');
 });
 
 it('does not overwrite a focused dirty settings field on an unsolicited state push', async () => {

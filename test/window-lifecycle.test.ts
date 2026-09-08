@@ -13,7 +13,7 @@ import {
 } from '../src/main/window-lifecycle.js';
 
 describe('native window activation', () => {
-  it('launches through the same maximized presentation as native reopen and preserves explicit fullscreen', () => {
+  it('opens at the configured window size and preserves the user chosen native window state', () => {
     const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
     const present = source.slice(source.indexOf('function showWindow()'), source.indexOf('\nsetFinishNotifier(', source.indexOf('function showWindow()'))).replace('function showWindow(): void', 'function showWindow()');
     const operations: string[] = [];
@@ -24,10 +24,10 @@ describe('native window activation', () => {
     const createWindow = vi.fn();
     const context = vm.createContext({ window: native, quitting: false, createWindow });
     vm.runInContext(present + '\nshowWindow();', context);
-    expect(operations.splice(0)).toEqual(['show', 'maximize', 'focus']);
+    expect(operations.splice(0)).toEqual(['show', 'focus']);
     state.minimized = true;
     vm.runInContext('showWindow()', context);
-    expect(operations.splice(0)).toEqual(['restore', 'show', 'maximize', 'focus']);
+    expect(operations.splice(0)).toEqual(['restore', 'show', 'focus']);
     state.minimized = false; state.fullscreen = true;
     vm.runInContext('showWindow()', context);
     expect(operations.splice(0)).toEqual(['show', 'focus']);

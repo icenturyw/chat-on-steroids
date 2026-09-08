@@ -188,11 +188,9 @@ function showWindow(): void {
   }
   if (window.isMinimized()) window.restore();
   window.show();
-  // Launch, tray reopen and native activation share the same work-area presentation.
-  // Apply the final native state after showing the hidden window. Its initial outer bounds
-  // already fill the work area, so first paint also uses the requested full-size layout.
-  // Preserve an explicit F11 fullscreen choice; ordinary opens retain the title bar.
-  if (!window.isFullScreen()) window.maximize();
+  // Keep the compact centered bounds chosen by createWindow() on first launch. Reopening an
+  // existing window also preserves whatever size/state the user chose instead of forcing the
+  // app back to a maximized presentation every time it is shown.
   window.focus();
 }
 

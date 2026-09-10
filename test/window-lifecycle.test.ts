@@ -17,9 +17,10 @@ describe('native window activation', () => {
     const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
     const present = source.slice(source.indexOf('function showWindow()'), source.indexOf('\nsetFinishNotifier(', source.indexOf('function showWindow()'))).replace('function showWindow(): void', 'function showWindow()');
     const operations: string[] = [];
-    const state = { minimized: false, fullscreen: false };
-    const native = { isMinimized: () => state.minimized, isFullScreen: () => state.fullscreen,
-      restore: () => operations.push('restore'), maximize: () => operations.push('maximize'),
+    const state = { minimized: false };
+    const native = { isMinimized: () => state.minimized, isFullScreen: () => false,
+      maximize: () => operations.push('maximize'),
+      restore: () => operations.push('restore'),
       show: () => operations.push('show'), focus: () => operations.push('focus') };
     const createWindow = vi.fn();
     const context = vm.createContext({ window: native, quitting: false, createWindow });
@@ -28,40 +29,47 @@ describe('native window activation', () => {
     state.minimized = true;
     vm.runInContext('showWindow()', context);
     expect(operations.splice(0)).toEqual(['restore', 'show', 'focus']);
-    state.minimized = false; state.fullscreen = true;
-    vm.runInContext('showWindow()', context);
-    expect(operations.splice(0)).toEqual(['show', 'focus']);
     context.quitting = true;
     vm.runInContext('showWindow()', context);
     expect(operations).toEqual([]);
 
     let ready!: () => void;
     const startup = source.slice(source.indexOf("  window.once('ready-to-show'"), source.indexOf('  // A renderer that fails', source.indexOf("  window.once('ready-to-show'")));
-    const showWindow = vi.fn();
-    const launch = vm.createContext({ window: { once: (_event: string, listener: () => void) => { ready = listener; } }, quitting: false, showWindow });
+    const startupOperations: string[] = [];
+    const showWindow = vi.fn(() => startupOperations.push('showWindow'));
+    const launch = vm.createContext({ window: {
+      once: (_event: string, listener: () => void) => { ready = listener; }
+    }, quitting: false, showWindow });
     vm.runInContext(startup, launch);
-    ready(); expect(showWindow).toHaveBeenCalledTimes(1);
-    launch.quitting = true; ready(); expect(showWindow).toHaveBeenCalledTimes(1);
+    ready();
+    expect(startupOperations.splice(0)).toEqual(['showWindow']);
+    launch.quitting = true;
+    ready();
+    expect(showWindow).toHaveBeenCalledTimes(1);
   });
-  it('requests only passive catalog observation on show with browser presence, never during quit or absence', async () => {
+  it('discovers on first visible use only when there is no saved catalog, never on repeat show or quit', async () => {
     const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
     const listener = source.slice(source.indexOf("  window.on('show'"), source.indexOf("  window.once('ready-to-show'"));
     let show!: () => void;
-    const start = vi.fn(async () => ({}));
-    let present = false;
+    let state = 'ready';
+    const start = vi.fn(async () => { state = 'pending'; return {}; });
     const context = vm.createContext({ window: { on: (event: string, callback: () => void) => {
       expect(event).toBe('show'); show = callback;
-    } }, quitting: false, bridgeStatus: async () => ({ present }), startChatModelDiscovery: start, logWarn: vi.fn() });
+    } }, quitting: false, getChatModels: () => ({ state }), startChatModelDiscovery: start, logWarn: vi.fn() });
     vm.runInContext(listener, context);
     show(); await Promise.resolve(); expect(start).not.toHaveBeenCalled();
-    present = true;
+    state = 'unknown';
     show(); await Promise.resolve();
     show(); await Promise.resolve();
-    expect(start).toHaveBeenCalledTimes(2);
-    expect(start).toHaveBeenCalledWith(false);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(true);
+    state = 'unavailable';
+    show(); await Promise.resolve();
+    expect(start).toHaveBeenCalledTimes(1);
+    state = 'unknown';
     context.quitting = true;
     show();
-    expect(start).toHaveBeenCalledTimes(2);
+    expect(start).toHaveBeenCalledTimes(1);
   });
   it('never bootstraps shared state from a secondary or already-quitting process', () => {
     expect(ownsAppRuntime(true)).toBe(true);

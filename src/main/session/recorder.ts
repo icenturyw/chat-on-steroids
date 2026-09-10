@@ -46,7 +46,7 @@ import {
   endSession,
   findSessionByConversation,
   getSession,
-  listAllSessions,
+  readEverySummary,
   readAsset,
   readEvents,
   readRecentEvents,
@@ -866,7 +866,9 @@ export async function repairDeterministicAttribution(): Promise<{ sessions: numb
   let repairedSessions = 0;
   let repairedCalls = 0;
 
-  for (const summary of await listAllSessions()) {
+  // Every Unattributed session, not a bounded page: this sweep promises to repair all of
+  // them, and one it cannot see is one it silently leaves misattributed forever.
+  for (const summary of await readEverySummary()) {
     if (summary.conversationId !== null || summary.title !== 'Unattributed activity') continue;
     const events = await readEvents(summary.id);
     const scannedThroughSeq = events.reduce((highest, event) => Math.max(highest, event.seq), 0);
@@ -1100,6 +1102,8 @@ export interface ToolCallInput {
   tool: string;
   args: unknown;
   content: readonly ToolContentPart[];
+  /** External MCP responses can carry structured results and resource blocks alongside text. */
+  protocolResult?: unknown;
   outcome: ToolOutcome;
   durationMs: number;
   startedAt: number;
@@ -1275,7 +1279,8 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
     // result into ActivitySummary.detail; scrubbing only in storeText would keep the
     // raw capability out of args/result while still leaking it through that summary to
     // events.jsonl, the renderer and the extension activity feed.
-    const resultText = redactResult(input.tool, textParts.join('\n'));
+    const authoredResultText = redactResult(input.tool, textParts.join('\n'));
+    const resultText = input.protocolResult === undefined ? authoredResultText : redactResult(input.tool, safeJson(input.protocolResult));
     const assets: AssetRef[] = [...evidence.assets];
     for (const part of input.content) {
       if (part.type !== 'image' || !part.data) continue;
@@ -1289,7 +1294,7 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
       evidence,
       outcome: input.outcome,
       durationMs: input.durationMs,
-      resultHead: resultText.split('\n', 1)[0] ?? ''
+      resultHead: authoredResultText.split('\n', 1)[0] ?? ''
     });
 
     const call: ToolCallRecord = {
@@ -1586,8 +1591,10 @@ export interface ChatObservation {
   detail?: string;
   /** Browser terminal proof; app-owned Goal policy is applied only after this is durable. */
   goalEligible?: boolean;
-  /** chat_error only: a recognised transport failure inside an assistant turn. */
+  /** chat_error only: explicit recovery authority from a transport failure or app watchdog. */
   recoverable?: boolean;
+  /** chat_error only: the DOM classifier identified a provider access limit, in any language. */
+  blocking?: boolean;
   /** tool_evidence only: the connector requests this turn's message model holds. */
   calls?: PageCallEvidence[];
 }

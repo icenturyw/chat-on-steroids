@@ -69,7 +69,9 @@ export type SecretKey =
   | 'customProviderApiKey'
   | 'cloudflareTunnelToken'
   | 'mcpCorePathToken'
-  | 'mcpDesktopPathToken';
+  | 'mcpDesktopPathToken'
+  | 'mcpPluginsPathToken'
+  | `plugin:${string}`;
 
 export function initSecretsPath(userDataDir: string): void {
   secretsPath = path.join(userDataDir, FILE_NAME);

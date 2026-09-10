@@ -288,6 +288,7 @@ const configSchema = z.object({
     // loads unchanged and simply has no Desktop tunnel yet — which is also the correct
     // state for it, since the user has not created that connector in ChatGPT either.
     desktopTunnelId: z.string().max(128).optional().default(''),
+    pluginsTunnelId: z.string().max(128).optional().default(''),
     binaryPath: z.string().max(4096),
     cloudflareMode: z.enum(['quick', 'named']).optional().default(DEFAULT_CLOUDFLARE_MODE),
     cloudflarePublicUrl: z.string().max(2048).optional().default(DEFAULT_CLOUDFLARE_PUBLIC_ORIGIN),
@@ -492,6 +493,7 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
       kind: 'openai',
       tunnelId: '',
       desktopTunnelId: '',
+      pluginsTunnelId: '',
       binaryPath: '',
       cloudflareMode: DEFAULT_CLOUDFLARE_MODE,
       cloudflarePublicUrl: DEFAULT_CLOUDFLARE_PUBLIC_ORIGIN,

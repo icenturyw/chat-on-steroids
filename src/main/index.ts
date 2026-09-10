@@ -8,11 +8,12 @@ import { app, Notification, BrowserWindow, Menu, Tray, nativeImage, nativeTheme,
 import { getConfig, initConfigPath, loadConfig } from './config.js';
 import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } from './connection.js';
 import { registerIpc } from './ipc.js';
-import { startChatModelDiscovery } from './chat-models.js';
+import { getChatModels, restoreChatModels, startChatModelDiscovery } from './chat-models.js';
 import { initLogFile, logError, logInfo, logWarn } from './logger.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
-import { bridgeStatus, setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
+import { pluginManager } from './plugins/manager.js';
+import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
 import { flushSessions, initSessionStore, pruneSessions } from './session/store.js';
 import {
   flushRecorder,
@@ -60,7 +61,7 @@ import {
 import { startSessionRetentionMaintenance } from './session/retention.js';
 import { runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
-import { UI_BASE_ZOOM, windowLayoutForWorkArea } from './window-layout.js';
+import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme } from './window-layout.js';
 import { openInPreferredBrowser } from './browser.js';
 import {
   applyLoginStartup,
@@ -73,6 +74,7 @@ import {
 } from './window-lifecycle.js';
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
+import { editContextMenuTemplate } from './edit-context-menu.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -104,6 +106,10 @@ function createWindow(): void {
     fullscreenable: false,
     show: false,
     autoHideMenuBar: true,
+    ...(process.platform === 'win32' ? {
+      titleBarStyle: 'hidden' as const,
+      titleBarOverlay: titleBarOverlayForTheme(getConfig().ui.theme)
+    } : {}),
     // Painted before the renderer loads, so a dark window never flashes white.
     backgroundColor: getConfig().ui.theme === 'dark' ? '#0e0e11' : '#ffffff',
     title: 'Chat On Steroids',
@@ -119,17 +125,22 @@ function createWindow(): void {
     }
   });
 
-  // Observe once through an already open browser. Reopening a window never opens
-  // Chrome or refreshes a ready catalog; explicit Reload models owns that action.
+  if (process.platform === 'win32') window.removeMenu();
+
+  // First use discovers the account once. A restored catalog is immediately usable;
+  // showing the window again cannot refresh it or open another browser attempt.
   window.on('show', () => {
-    if (!quitting) void bridgeStatus().then(status => {
-      if (!quitting && status.present) return startChatModelDiscovery(false);
-    }).catch(error => logWarn(`model discovery on window open: ${error.message}`));
+    if (!quitting && getChatModels().state === 'unknown') void startChatModelDiscovery(true)
+      .catch(error => logWarn(`model discovery on window open: ${error.message}`));
   });
   window.once('ready-to-show', () => {
     // A renderer can finish loading after Cmd+Q has already entered bounded teardown. Never let
     // that late native event make the app visible again while `will-quit` is draining.
-    if (!quitting) showWindow();
+    if (!quitting) {
+      // Preserve the compact centered bounds selected by windowLayoutForWorkArea(). Reopening the
+      // app or restoring it from the tray must not overwrite the user's chosen native geometry.
+      showWindow();
+    }
   });
 
   // A renderer that fails to load leaves a blank window with no other clue, so
@@ -139,6 +150,12 @@ function createWindow(): void {
     if (input.type !== 'keyDown' || input.key !== 'F11' || input.isAutoRepeat) return;
     event.preventDefault();
     window?.setFullScreen(!window.isFullScreen());
+  });
+  window.webContents.on('context-menu', (_event, params) => {
+    const owner = window;
+    if (!owner || owner.isDestroyed()) return;
+    const template = editContextMenuTemplate(params);
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: owner });
   });
   window.webContents.on('did-fail-load', (_event, code, description) =>
     logError(`window failed to load (${code}): ${description}`)
@@ -281,7 +298,10 @@ void app.whenReady().then(async () => {
   initSecretsPath(userData);
   initSessionStore(userData);
   initDurableStore(userData);
+  await restoreChatModels();
+  if (windowActivation.isDisabled()) return;
   await loadConfig();
+  await pluginManager.initialize(userData);
   if (windowActivation.isDisabled()) return;
   try { applyLoginStartup(app, getConfig().ui.startAtLogin === true); }
   catch (error) { logWarn(`Windows login startup: ${error instanceof Error ? error.message : String(error)}`); }
@@ -478,7 +498,7 @@ app.on('will-quit', (event) => {
       {
         name: 'process cleanup',
         budgetMs: 15_000,
-        run: () => [unifiedExecManager.terminateAllProcesses(), stopComputerHelper()]
+        run: () => [unifiedExecManager.terminateAllProcesses(), stopComputerHelper(), pluginManager.close()]
       },
       // Phase 3: recorder work can enqueue both session projections and named durable state.
       { name: 'recorder flush', budgetMs: 10_000, run: () => [flushRecorder()] },

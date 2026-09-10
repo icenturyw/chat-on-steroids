@@ -25,7 +25,7 @@
  */
 
 import { readDurable, writeDurableSoon } from '../durable.js';
-import { listAllSessions, readRecentEvents } from './store.js';
+import { readEverySummary, readRecentEvents } from './store.js';
 
 export interface RequestCorrelation {
   requestId: string;
@@ -51,6 +51,16 @@ const CORRELATIONS_STATE_VERSION = 5;
 
 const byRequest = new Map<string, RequestCorrelation>();
 const waiters = new Map<string, Set<() => void>>();
+/**
+ * Evidence grace belongs to the request, not each tool call in its workflow. All callers
+ * measure their allowance from its first wait, so sequential and overlapping calls cannot
+ * restart the clock. Keep the start rather than a spent flag: the recorder's longer grace
+ * must remain available after a shorter identity lookup expires. This is only wait accounting,
+ * never a negative ownership verdict; exact evidence always wins, even after every deadline.
+ * Process-local and bounded: a restart or eviction may grant fresh grace, never an owner.
+ */
+const evidenceWindowStarts = new Map<string, number>();
+const MAX_EVIDENCE_WINDOWS = 2_000;
 let restored = false;
 let restoring: Promise<void> | null = null;
 
@@ -145,6 +155,7 @@ function merge(input: RequestCorrelation): 'stored' | 'same' | 'refused' {
   const previous = byRequest.get(input.requestId);
   if (!previous) {
     byRequest.set(input.requestId, { ...input });
+    evidenceWindowStarts.delete(input.requestId);
     trim();
     wake(input.requestId);
     return 'stored';
@@ -206,7 +217,12 @@ async function restoreRequestCorrelationsOnce(): Promise<void> {
   // is idempotent for the same conversation and still makes contradictions sticky.
   let sessions;
   try {
-    sessions = await listAllSessions();
+    // Every retained session, not the bounded list. This decides which conversation owns a
+    // request id, and `readAllSummaries()` behind `listAllSessions()` stops at
+    // MAX_SCANNED_SESSIONS and says so in its own doc comment: do not use it for identity.
+    // Past that cap it answers "no such session" for a session that exists, and the request
+    // is then reconciled against whatever else claims it.
+    sessions = await readEverySummary();
   } catch (error) {
     // A valid direct snapshot can be restored before the session store is initialized (some
     // tests and narrowly scoped consumers do exactly that). In the real app the store is ready
@@ -300,6 +316,17 @@ export async function awaitRequestCorrelation(requestId: string | null | undefin
   const immediate = requestCorrelation(requestId);
   if (immediate || timeoutMs <= 0) return immediate;
 
+  const now = performance.now();
+  const startedAt = evidenceWindowStarts.get(requestId) ?? now;
+  if (!evidenceWindowStarts.has(requestId)) {
+    evidenceWindowStarts.set(requestId, startedAt);
+    if (evidenceWindowStarts.size > MAX_EVIDENCE_WINDOWS) {
+      evidenceWindowStarts.delete(evidenceWindowStarts.keys().next().value!);
+    }
+  }
+  const remainingMs = timeoutMs - (now - startedAt);
+  if (remainingMs <= 0) return null;
+
   let timer: NodeJS.Timeout | null = null;
   await new Promise<void>((resolve) => {
     const set = waiters.get(requestId) ?? new Set<() => void>();
@@ -309,7 +336,7 @@ export async function awaitRequestCorrelation(requestId: string | null | undefin
       set.delete(resolve);
       if (set.size === 0) waiters.delete(requestId);
       resolve();
-    }, timeoutMs);
+    }, remainingMs);
     timer.unref?.();
   });
   if (timer) clearTimeout(timer);
@@ -319,6 +346,7 @@ export async function awaitRequestCorrelation(requestId: string | null | undefin
 /** A conversation being closed cannot invalidate an already issued request. */
 export function resetCorrelationRegistryForTests(): void {
   byRequest.clear();
+  evidenceWindowStarts.clear();
   restored = false;
   restoring = null;
   for (const requestId of [...waiters.keys()]) wake(requestId);

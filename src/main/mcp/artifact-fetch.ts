@@ -1,4 +1,4 @@
-/** Validates bounded native-file references and streams from an exact file-host allowlist.
+/** Validates bounded native-file references and streams from trusted file hosts.
  * The schema requests ChatGPT native-file injection; a URL shape is not proof of who
  * authored a reference. Host/path checks and the approved-root write policy still apply.
  */
@@ -6,7 +6,12 @@
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 
-const OPENAI_FILE_HOSTS = new Set(['files.oaiusercontent.com']);
+const OPENAI_FILE_HOSTS = new Set([
+  'files.oaiusercontent.com',
+  // Exact image-generation download host in OpenAI's own executed cookbook:
+  // https://github.com/openai/openai-cookbook/blob/main/examples/dalle/Image_generations_edits_and_variations_with_DALL-E.ipynb
+  'oaidalleapiprodscus.blob.core.windows.net'
+]);
 // A customer-chosen Azure account prefix is not proof of OpenAI ownership. Regional
 // hosts need exact verified entries; never trust a wildcard over that shared namespace.
 const OPENAI_FILE_ID_MAX_LENGTH = 512;
@@ -158,13 +163,19 @@ export function validateOpenAIFileUrl(value: string): string {
     url.password !== '' ||
     url.hash !== ''
   ) {
-    throw new ArtifactFetchError('ChatGPT file download URL is outside the trusted file host.');
+    // Native signed URLs carry credentials and private file identity. The canonical
+    // hostname alone makes a new regional host diagnosable without recording either.
+    throw new ArtifactFetchError(`ChatGPT file download URL is outside the trusted file host (host: ${url.hostname.slice(0, 253) || 'none'}).`);
   }
   return url.toString();
 }
 
 function isTrustedOpenAIFileHost(hostname: string): boolean {
-  return OPENAI_FILE_HOSTS.has(hostname);
+  // ChatGPT ImageGen uses regional hosts within OpenAI's documented file namespace:
+  // https://help.openai.com/en/articles/9247338
+  // A DNS-label boundary accepts those regions without accepting lookalike suffixes.
+  // Azure remains exact-only: other Azure account names are independently controlled.
+  return OPENAI_FILE_HOSTS.has(hostname) || hostname.endsWith('.oaiusercontent.com');
 }
 
 function isRedirectStatus(status: number): boolean {

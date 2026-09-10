@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => {
       kind: 'cloudflared',
       tunnelId: '',
       desktopTunnelId: '',
+      pluginsTunnelId: '',
       binaryPath: '',
       cloudflareMode: 'quick' as 'quick' | 'named',
       cloudflarePublicUrl: '',
@@ -87,7 +88,8 @@ vi.mock('../src/main/mcp/server.js', () => ({
       url: `http://127.0.0.1:${port}/mcp/core/core-token`,
       urls: {
         core: `http://127.0.0.1:${port}/mcp/core/core-token`,
-        desktop: `http://127.0.0.1:${port}/mcp/desktop/desktop-token`
+        desktop: `http://127.0.0.1:${port}/mcp/desktop/desktop-token`,
+        plugins: `http://127.0.0.1:${port}/mcp/plugins/plugins-token`
       },
       stop: mocks.endpointStop
     };
@@ -160,6 +162,7 @@ describe('connection surface state', () => {
     mocks.config.readOnly = true;
     mocks.config.tunnel.kind = 'cloudflared';
     mocks.config.tunnel.tunnelId = '';
+    mocks.config.tunnel.pluginsTunnelId = '';
     mocks.config.tunnel.binaryPath = '';
     mocks.config.tunnel.cloudflareMode = 'quick';
     mocks.config.tunnel.cloudflarePublicUrl = '';
@@ -200,9 +203,13 @@ describe('connection surface state', () => {
     const firstTokens = { ...mocks.surfaceTokens } as Record<string, string>;
     expect(firstTokens.core).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(firstTokens.desktop).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(firstTokens.plugins).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(firstTokens.core).not.toBe(firstTokens.desktop);
+    expect(firstTokens.core).not.toBe(firstTokens.plugins);
+    expect(firstTokens.desktop).not.toBe(firstTokens.plugins);
     expect(mocks.secrets.mcpCorePathToken).toBe(firstTokens.core);
     expect(mocks.secrets.mcpDesktopPathToken).toBe(firstTokens.desktop);
+    expect(mocks.secrets.mcpPluginsPathToken).toBe(firstTokens.plugins);
 
     await firstConnection.disconnect();
     vi.resetModules();
@@ -277,6 +284,22 @@ describe('connection surface state', () => {
     expect(mocks.endpointOptions).toEqual({ port: 28_768 });
   });
 
+  it('ignores retired Plugins tunnel reports after changing only its tunnel', async () => {
+    mocks.config.tunnel.kind = 'openai';
+    mocks.config.tunnel.tunnelId = 'core-test';
+    mocks.config.tunnel.pluginsTunnelId = 'plugins-before';
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+    expect(mocks.starts).toBe(2);
+    const oldReport = mocks.report!;
+    mocks.config.tunnel.pluginsTunnelId = 'plugins-after';
+    await connection.applySettings();
+    expect(mocks.starts).toBe(3);
+    expect(mocks.endpointStop).not.toHaveBeenCalled();
+    oldReport({ state: 'error', detail: 'Retired failure', publicUrl: 'https://old.invalid' });
+    expect(connection.getStatus().surfaces.find((s) => s.id === 'plugins')).toMatchObject({ state: 'live', detail: 'Connected.' });
+    await connection.disconnect();
+  });
   it('publishes refresh declarations only for live surfaces and does not rebuild on unchanged health reports', async () => {
     const connection = await import('../src/main/connection.js');
     const refresh = await import('../src/main/plugin-refresh.js');

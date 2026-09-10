@@ -58,6 +58,49 @@ async function streamText(stream: AsyncIterable<unknown>): Promise<string> {
 // ------------------------------------------------------------------ fetch gateway
 
 describe('artifact file gateway', () => {
+  it.each(['sdmntprnortheu.oaiusercontent.com', 'sdmntpritalynorth.oaiusercontent.com'])(
+    'downloads native ImageGen files from the reported regional host %s', async host => {
+      const url = `https://${host}/private/generated.png?sig=test`;
+      expect(validateOpenAIFileUrl(url)).toBe(url);
+      const fetch = vi.fn(stubFetch(address => address === GOOD_URL
+        ? new Response(null, { status: 302, headers: { location: url } }) : okResponse('image-bytes')));
+      const opened = await openArtifactFile(fileRef(), { fetch });
+      expect(await streamText(opened.stream)).toBe('image-bytes');
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+  it.each([
+    'sdmntprnortheu.oaiusercontent.com.evil.example',
+    'eviloaiusercontent.com', 'oaiusercontent.com', 'other.blob.core.windows.net',
+    'sdmntprnortheu.oaiusercontent.com.'
+  ])('rejects a regional download lookalike or untrusted host %s before fetching it', async host => {
+    const fetch = vi.fn(stubFetch(() => new Response(null, {
+      status: 302, headers: { location: `https://${host}/private/image.png` }
+    })));
+    await expect(openArtifactFile(fileRef(), { fetch })).rejects.toThrow(/outside the trusted file host/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts the exact image host published by the OpenAI image-generation cookbook', async () => {
+    const imageUrl = 'https://oaidalleapiprodscus.blob.core.windows.net/private/generated.png?sig=test';
+    expect(validateOpenAIFileUrl(imageUrl)).toBe(imageUrl);
+    const opened = await openArtifactFile(fileRef({ download_url: imageUrl }), { fetch: stubFetch(() => okResponse('image-bytes')) });
+    expect(await streamText(opened.stream)).toBe('image-bytes');
+    const redirected = await openArtifactFile(fileRef(), { fetch: stubFetch(url => url === GOOD_URL
+      ? new Response(null, { status: 302, headers: { location: imageUrl } }) : okResponse('redirected-image')) });
+    expect(await streamText(redirected.stream)).toBe('redirected-image');
+    for (const host of ['oaidalleapiprodscus.blob.core.windows.net.evil.example', 'oaidalleapiprodscus-lookalike.blob.core.windows.net', 'other.blob.core.windows.net'])
+      expect(() => validateOpenAIFileUrl(`https://${host}/private/image.png`)).toThrow();
+  });
+
+  it('reports only the rejected hostname, never signed URL credentials or file paths', () => {
+    let message = '';
+    try { validateOpenAIFileUrl('https://secret-user:secret-password@unverified.blob.core.windows.net/private-file-id?sig=secret-signature#secret-fragment'); }
+    catch (error) { message = (error as Error).message; }
+    expect(message).toContain('unverified.blob.core.windows.net');
+    expect(message).not.toMatch(/secret|private-file-id|https:/);
+  });
+
   it('accepts only the trusted ChatGPT file hosts over https', () => {
     expect(validateOpenAIFileUrl(GOOD_URL)).toBe(GOOD_URL);
     for (const bad of [

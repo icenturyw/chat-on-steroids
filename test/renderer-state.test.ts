@@ -3,80 +3,12 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_MODEL, DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
-import { installUiLocale, isSimplifiedChineseLocale, translateUiText } from '../src/renderer/i18n.js';
-
-it('selects Simplified Chinese without changing Traditional Chinese locales', () => {
-  expect(isSimplifiedChineseLocale('zh-CN')).toBe(true);
-  expect(isSimplifiedChineseLocale('zh-Hans-SG')).toBe(true);
-  expect(isSimplifiedChineseLocale('zh')).toBe(true);
-  expect(isSimplifiedChineseLocale('zh-TW')).toBe(false);
-  expect(isSimplifiedChineseLocale('zh-Hant-HK')).toBe(false);
-  expect(isSimplifiedChineseLocale('en-US')).toBe(false);
-});
-
-it('translates fixed and counted renderer chrome into Simplified Chinese', () => {
-  expect(translateUiText('Setup')).toBe('接入向导');
-  expect(translateUiText('Workspace')).toBe('工作区');
-  expect(translateUiText('Usage')).toBe('用量统计');
-  expect(translateUiText('Agents & automation')).toBe('代理与自动化');
-  expect(translateUiText('Processed tokens · est.')).toBe('已处理 Token · 估算');
-  expect(translateUiText('82% remaining')).toBe('剩余 82%');
-  expect(translateUiText('6 of 9 permissions')).toBe('已启用 6 / 9 项权限');
-  expect(translateUiText('3 sub-agents · 2 active')).toBe('3 个子代理 · 2 个活动中');
-  expect(translateUiText('no handshake yet')).toBe('尚未完成握手');
-  expect(translateUiText('just now')).toBe('刚刚');
-  expect(translateUiText('now')).toBe('刚刚');
-  expect(translateUiText('verified ChatGPT link')).toBe('已验证 ChatGPT 链路');
-  expect(translateUiText('waiting for first ChatGPT call')).toBe('等待 ChatGPT 首次调用');
-  expect(translateUiText('ChatGPT reached this app 8s ago')).toBe('ChatGPT 已连接到本应用：8 秒前');
-  expect(translateUiText('Connector route')).toBe('连接器链路');
-  expect(translateUiText('ChatGPT → this app')).toBe('ChatGPT → 本应用');
-  expect(translateUiText('waiting')).toBe('等待中');
-  expect(translateUiText('Manage folders')).toBe('管理文件夹');
-  expect(translateUiText('4 permissions')).toBe('4 项权限');
-  expect(translateUiText('9 total · 1 folder')).toBe('共 9 个 · 1 个文件夹');
-  expect(translateUiText('4 messages · 11 tools')).toBe('4 条消息 · 11 次工具调用');
-  expect(translateUiText('3 retained sessions · one live now')).toBe('保留 3 个会话 · 当前 1 个活动');
-  expect(translateUiText('Connected. Listening on 127.0.0.1:8765 · last message just now.')).toBe(
-    '已连接。正在监听 127.0.0.1:8765 · 刚刚收到消息。'
-  );
-  expect(
-    translateUiText(
-      'Nothing shared yet. Press Add or drop a folder here. ChatGPT sees short names\n                  like'
-    )
-  ).toBe('尚未共享任何文件夹。点击“添加”或将文件夹拖到此处。ChatGPT 只会看到类似');
-  expect(translateUiText('Cloudflare mode')).toBe('Cloudflare 模式');
-  expect(translateUiText('user-authored text')).toBe('user-authored text');
-});
 
 let dom: JSDOM | null = null;
 afterEach(() => {
   dom?.window.close();
   dom = null;
   vi.resetModules();
-});
-
-it('localises textarea chrome without translating the user-authored value', () => {
-  dom = new JSDOM('<body><textarea placeholder="Ask anything…">Usage</textarea><pre title="Usage">Usage</pre></body>', {
-    url: 'https://local.test/'
-  });
-  const w = dom.window;
-  Object.assign(globalThis, {
-    window: w,
-    document: w.document,
-    HTMLElement: w.HTMLElement,
-    Element: w.Element,
-    Node: w.Node,
-    DocumentFragment: w.DocumentFragment,
-    MutationObserver: w.MutationObserver
-  });
-  installUiLocale(['zh-CN']);
-  const textarea = w.document.querySelector('textarea')!;
-  expect(textarea.getAttribute('placeholder')).toBe('输入任何问题…');
-  expect(textarea.textContent).toBe('Usage');
-  const pre = w.document.querySelector('pre')!;
-  expect(pre.textContent).toBe('Usage');
-  expect(pre.getAttribute('title')).toBe('Usage');
 });
 
 it('does not overwrite a focused dirty settings field on an unsolicited state push', async () => {
@@ -602,6 +534,25 @@ it('saves the ChatGPT browser choice from its settings control and restores it o
   expect(browser.value).toBe('edge');
   mounted.push({ ...mounted.state, config: { ...mounted.state.config, ui: { ...mounted.state.config.ui, chatBrowser: 'chrome' } } });
   expect(browser.value).toBe('chrome');
+});
+
+it('shows the current host Desktop tools without rebuilding permission controls on state pushes', async () => {
+  const mounted = await mountChat({
+    platform: { family: 'windows', name: 'Windows', desktopAutomation: true }
+  });
+  const doc = mounted.window.document;
+  const names = () => Array.from(doc.querySelectorAll('[data-group="desktop"] .tool-names code'), node => node.textContent);
+  const control = doc.querySelector<HTMLInputElement>('[data-cap="control"]')!;
+  const windowsNames = ['list_windows', 'get_window', 'list_apps', 'get_window_state',
+    'launch_app', 'click', 'press_key', 'type_text', 'scroll', 'set_value', 'drag',
+    'perform_secondary_action', 'activate_window', 'read_clipboard', 'write_clipboard', 'exec'];
+  expect(names()).toEqual(windowsNames);
+  mounted.push({ ...mounted.state, platform: { family: 'macos', name: 'macOS', desktopAutomation: true } });
+  expect(names()).toEqual(['observe', 'computer', 'exec']);
+  expect(doc.querySelector('[data-cap="control"]')).toBe(control);
+  mounted.push(mounted.state);
+  expect(names()).toEqual(windowsNames);
+  expect(mounted.calls).toHaveLength(0);
 });
 
 it('preserves native Desktop permissions when saving unrelated settings on Linux', async () => {

@@ -19,6 +19,8 @@
 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import {
+  createInboundTiming,
+  formatInboundTiming,
   openAiSessionFromHeader,
   requestIdFromHeader,
   withInboundOpenAiSession,
@@ -345,7 +347,7 @@ export async function startMcpServer(
     prmPath: `${PRM_PREFIX}${surface.basePath}`,
     url: '',
     handler: toNodeHandler(
-      createMcpHandler(() => buildServer(stableContext(surface.id), surface.id)),
+      createMcpHandler(() => buildServer(stableContext(surface.id), surface.id, undefined, () => stableContext(surface.id))),
       { onerror: (error) => logError(`MCP handler error (${surface.id}): ${error.message}`) }
     )
   }));
@@ -355,6 +357,7 @@ export async function startMcpServer(
   const checkOrigin = localhostOriginValidation();
 
   const server = http.createServer((req, res) => {
+    const timing = createInboundTiming();
     const url = req.url ?? '';
     const pathOnly = url.split('?')[0] ?? '';
     const selfTest = req.headers[SELF_TEST_HEADER] === selfTestToken;
@@ -367,7 +370,11 @@ export async function startMcpServer(
     const prmRoute = routes.find((candidate) => safeEqual(pathOnly, candidate.prmPath)) ?? null;
 
     const startedAt = Date.now();
+    const publication = { completedAt: null as number | null, failed: false };
+    res.once('close', () => { if (publication.completedAt === null) publication.failed = true; });
     res.on('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300 && !publication.failed) publication.completedAt = Date.now();
+      else publication.failed = true;
       const shape = route
         ? `mcp/${route.id}`
         : prmRoute
@@ -375,7 +382,7 @@ export async function startMcpServer(
           : pathOnly.slice(0, 40);
       const method = req.method ?? '?';
       const who = selfTest ? ' (self-test)' : tunnelProbe ? ' (tunnel probe)' : '';
-      const line = `${method} ${shape} → ${res.statusCode} in ${Date.now() - startedAt}ms${who}`;
+      const line = `${method} ${shape} → ${res.statusCode} in ${Date.now() - startedAt}ms${who}${formatInboundTiming(timing)}`;
       // Streamable HTTP makes the server-opened SSE stream and session deletion
       // optional, and 405 is the prescribed answer for a server that offers
       // neither. ChatGPT probes for both on every connect, so treating those two
@@ -432,8 +439,11 @@ export async function startMcpServer(
     const requestId = requestIdFromHeader(req.headers['x-request-id']);
     const openAiSession = openAiSessionFromHeader(req.headers['x-openai-session']);
     const handle = (body?: unknown): void => {
-      withInboundRequestId(requestId, () =>
-        withInboundOpenAiSession(openAiSession, () => void route.handler(req, res, body))
+      withInboundRequestId(
+        requestId,
+        () => withInboundOpenAiSession(openAiSession, () => void route.handler(req, res, body)),
+        timing,
+        publication
       );
     };
     if (req.method === 'POST' && declaredHeader === undefined) {

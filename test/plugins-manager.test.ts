@@ -44,6 +44,37 @@ afterEach(async () => {
   await removeTempDir(dir);
 });
 describe('external plugin authority', () => {
+  it('keeps Windows package data below MAX_PATH across installation and replacement', async () => {
+    const directories: string[] = [];
+    vi.spyOn(pluginInstaller, 'installSource').mockImplementation(async (_source, directory) => {
+      directories.push(directory);
+      await fs.mkdir(directory, { recursive: true });
+      return { command: process.execPath, args: [entry], version: 'fixture', license: 'MIT' };
+    });
+    const row = (await manager.install({ source: { kind: 'command', command: process.execPath, args: [entry] } })).plugins[0]!;
+    await manager.update(row.id);
+    expect(directories).toHaveLength(2);
+    expect(directories[0]).not.toBe(directories[1]);
+    const packageData = 'venv/Lib/site-packages/jsonschema_specifications/schemas/draft201909/metaschema.json';
+    // Reproduce the report's redirected Windows root: the former two UUID levels
+    // place this actual Fetch dependency's data file at 267 characters.
+    const oldSuffix = path.win32.join('plugins', row.id, row.id, packageData);
+    const redirectedRoot = 'C:\\' + 'r'.repeat(267 - oldSuffix.length - 4);
+    expect(path.win32.join(redirectedRoot, oldSuffix)).toHaveLength(267);
+    for (const directory of directories) {
+      const relative = path.relative(dir, directory);
+      expect(path.win32.join(redirectedRoot, relative, packageData).length).toBeLessThan(260);
+      expect(path.dirname(directory)).toBe(path.join(dir, 'plugins', row.id));
+    }
+    await expect(fs.stat(directories[0]!)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(directories[1]!)).resolves.toBeDefined();
+    await manager.close();
+    manager = new PluginManager();
+    await manager.initialize(dir);
+    await vi.waitFor(() => expect(manager.snapshot().plugins[0]?.status).toBe('ready'), { timeout: 10_000 });
+    expect(manager.snapshot().plugins[0]?.id).toBe(row.id);
+  });
+
   it('reuses publication between lifecycle changes without exposing its cached membership array', async () => {
     const row = (await manager.install({ source: { kind: 'command', command: process.execPath, args: [entry] } })).plugins[0]!;
     const project = vi.spyOn(exposureModule, 'pluginExposure');
@@ -523,7 +554,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     await manager.close();
     manager = new PluginManager();
     await manager.initialize(dir);
-    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'));
+    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'), { timeout: 10_000 });
     expect(manager.snapshot().plugins[0]!.tools[0]!.exposedName).toBe('Echo.Mixed');
     expect(manager.tools()[0]!.name).toBe('Echo.Mixed');
     expect(manager.snapshot().plugins[0]!.id).toBe(row.id);
@@ -633,7 +664,9 @@ describe('enabled plugin process ownership', () => {
     expect(alive((await h.pids())[0]!.pid)).toBe(true);
     await manager.close(); manager = new PluginManager(); await manager.initialize(dir);
     expect(manager.tools().map(tool => tool.name)).toEqual(['Echo.Mixed']);
-    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'));
+    // Restoring a real Node child on a loaded Windows runner is not a one-second contract.
+    // Await the same ready postcondition before fake time tests process retention.
+    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'), { timeout: 10_000 });
     const active = (await h.pids())[1]!;
     vi.useFakeTimers();
     expect((await manager.call('Echo.Mixed', { value: 'first' })).isError).not.toBe(true);

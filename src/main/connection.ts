@@ -20,6 +20,7 @@ import { lastRequestAt, startMcpServer, tunnelProbeHeaders, type McpEndpoint } f
 import { lastToolCallAt } from './mcp/tools.js';
 import { SURFACE_IDS, SURFACE_LIST, surfaceIsUseful, desktopToolNames, type SurfaceId } from './mcp/surfaces.js';
 import { getSecret, setSecret, type SecretKey } from './secrets.js';
+import { setupApiKeySlot } from '../shared/setup-profile.js';
 import { startTunnel, TunnelError, type TunnelHandle } from './tunnel/index.js';
 import { desktopAutomationSupported } from './platform.js';
 import { publishPluginSurface, unpublishPluginSurface, pluginRefreshPublications } from './plugin-refresh.js';
@@ -75,6 +76,7 @@ type CoreTransport = {
   kind: TunnelSettings['kind'];
   tunnelId: string;
   binaryPath: string;
+  profileEpoch: number;
   cloudflareMode: 'quick' | 'named';
   cloudflarePublicUrl: string;
   cloudflareLocalPort: number;
@@ -248,6 +250,7 @@ function coreTransport(settings: TunnelSettings): CoreTransport {
       : '';
   return {
     kind: settings.kind,
+    profileEpoch: settings.kind === 'openai' ? settings.profileEpoch ?? 0 : 0,
     tunnelId: settings.kind === 'openai' ? settings.tunnelId : '',
     binaryPath: settings.kind === 'manual' ? '' : settings.binaryPath,
     cloudflareMode,
@@ -264,6 +267,7 @@ function sameCoreTransport(left: CoreTransport, right: CoreTransport): boolean {
     left.kind === right.kind &&
     left.tunnelId === right.tunnelId &&
     left.binaryPath === right.binaryPath &&
+    left.profileEpoch === right.profileEpoch &&
     left.cloudflareMode === right.cloudflareMode &&
     left.cloudflarePublicUrl === right.cloudflarePublicUrl &&
     left.cloudflareLocalPort === right.cloudflareLocalPort
@@ -377,7 +381,7 @@ async function connectImpl(): Promise<void> {
     if (desktopAutomationSupported() && (caps.screen || caps.control)) void prewarmComputerHelper();
     updateSurface('core', { state: 'starting', detail: 'Connecting…' });
 
-    const apiKey = config.tunnel.kind === 'openai' ? await getSecret('openaiApiKey') : null;
+    const apiKey = config.tunnel.kind === 'openai' ? await getSecret(setupApiKeySlot(config.tunnel.profileId)) : null;
     const cloudflareToken = namedCloudflare ? await getSecret('cloudflareTunnelToken') : null;
     if (shutdownRequested || generation !== connectionGeneration) {
       await disconnectImpl(30_000);
@@ -556,7 +560,7 @@ async function applySettingsImpl(): Promise<void> {
     }
     if (optionalTunnels.get(id)?.tunnelId === optionalTunnelId(config.tunnel, id)) continue;
     await stopOptionalTunnel(id, 'Reconnecting with the new tunnel…');
-    await startOptionalTunnel(id, connectionGeneration, config.tunnel, await getSecret('openaiApiKey'));
+    await startOptionalTunnel(id, connectionGeneration, config.tunnel, await getSecret(setupApiKeySlot(config.tunnel.profileId)));
   }
 }
 

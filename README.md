@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/images/readme-hero.svg?v=2" width="960" alt="Turn ChatGPT into Codex without touching Codex limits. Chat On Steroids: Your files. Your terminal. Your ChatGPT plan." /></p>
+<p align="center"><img src="docs/images/readme-hero.svg?v=2" width="960" alt="Turn ChatGPT into Codex-style local coding. Chat On Steroids: Your files. Your terminal. Your ChatGPT plan." /></p>
 
 <p align="center">
   <a href="https://github.com/totec448-spec/chat-on-steroids/releases/latest/download/Chat-On-Steroids-Setup-x64.exe"><img src="docs/images/download-windows.svg" width="208" height="56" alt="Download for Windows x64" /></a>&nbsp;
@@ -24,7 +24,7 @@
 
 **Stay in control of long tasks.** Send a correction while work runs. Goal follows unfinished work; Loop keeps working within your brief. Compact & Resume carries the session and worker history into a fresh chat.
 
-<p align="center"><strong>Uses your ChatGPT conversation. Does not consume Codex quota.</strong><br /><sub>Your account’s model availability, usage and context limits still apply.</sub></p>
+<p align="center"><strong>Uses your ChatGPT conversation rather than invoking Codex directly.</strong><br /><sub>ChatGPT Work and Codex share usage limits. Your account’s model availability, usage and context limits still apply. <a href="https://learn.chatgpt.com/docs/pricing">OpenAI usage details →</a></sub></p>
 
 <br />
 
@@ -67,5 +67,7 @@ Windows 10/11, **macOS 13 Ventura or newer**, or a current desktop Linux. Chrome
 **Cloudflare named tunnel:** this fork defaults to `https://chat-on-steroids.icenturyw.com` with local service `http://127.0.0.1:28767`. Create the remotely-managed tunnel route in Cloudflare with that hostname and Service, then paste the tunnel's **Tunnel Token** into Chat On Steroids. The app starts that named tunnel and publishes the same secret MCP path under the fixed hostname. The Tunnel Token is kept in OS secure credential storage and passed to `cloudflared` through `TUNNEL_TOKEN`, not the process command line.
 
 <p align="center"><a href="docs/setup.md">Setup &amp; help</a> &nbsp;·&nbsp; <a href="docs/plugins.md">Plugins</a> &nbsp;·&nbsp; <a href="CONTRIBUTING.md">Contribute</a> &nbsp;·&nbsp; <a href="SECURITY.md">Security</a> &nbsp;·&nbsp; <a href="LICENSE">MIT license</a></p>
+
+<p align="center">Built with our <a href="CONTRIBUTORS.md">community contributors</a>. Thank you to the people behind the code, designs, bug reports and testing.</p>
 
 <p align="center"><sub>Not affiliated with or endorsed by OpenAI. ChatGPT and Codex are OpenAI trademarks.</sub></p>

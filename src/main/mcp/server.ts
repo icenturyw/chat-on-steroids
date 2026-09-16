@@ -38,8 +38,15 @@ import { getConfig } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 import { buildServer, resetToolClock, type ToolContext } from './tools.js';
 import { SURFACE_IDS, surfaceDefinition, type SurfaceId } from './surfaces.js';
+import { observeCatalogTraffic, type CatalogObservation } from './catalog-observation.js';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const catalogResponses = new Map<SurfaceId, CatalogObservation & { at: number }>();
+let catalogEpoch = Symbol('mcp-catalog');
+export function lastCatalogResponse(surface: SurfaceId = 'core'): (CatalogObservation & { at: number }) | null {
+  const observation = catalogResponses.get(surface);
+  return observation ? { ...observation } : null;
+}
 
 export interface McpEndpoint {
   /** Reuses the endpoint's actual exposure projection; no tool handlers are executed. */
@@ -286,6 +293,8 @@ export async function startMcpServer(
   // usable across restarts. If secure storage is unavailable, fall back to a per-run random
   // token rather than weakening the endpoint or refusing to start the whole app.
   requestSeenAt = null;
+  const thisCatalogEpoch = catalogEpoch = Symbol('mcp-catalog');
+  catalogResponses.clear();
   surfaceRequestAt.clear();
   resetToolClock();
   selfTestToken = randomBytes(16).toString('hex');
@@ -346,10 +355,7 @@ export async function startMcpServer(
     ...surface,
     prmPath: `${PRM_PREFIX}${surface.basePath}`,
     url: '',
-    handler: toNodeHandler(
-      createMcpHandler(() => buildServer(stableContext(surface.id), surface.id, undefined, () => stableContext(surface.id))),
-      { onerror: (error) => logError(`MCP handler error (${surface.id}): ${error.message}`) }
-    )
+    mcp: createMcpHandler(() => buildServer(stableContext(surface.id), surface.id, undefined, () => stableContext(surface.id)))
   }));
   const checkHost = options.publicHostname
     ? hostHeaderValidation(['localhost', '127.0.0.1', '[::1]', options.publicHostname])
@@ -438,10 +444,28 @@ export async function startMcpServer(
     // OpenAI session key which remains usable when the request id is absent.
     const requestId = requestIdFromHeader(req.headers['x-request-id']);
     const openAiSession = openAiSessionFromHeader(req.headers['x-openai-session']);
+    const handler = toNodeHandler(observeCatalogTraffic(route.mcp, observation => {
+      const completed = () => {
+        try {
+          if (publication.failed || publication.completedAt === null || thisCatalogEpoch !== catalogEpoch) return;
+          const who = selfTest ? 'self-test' : tunnelProbe ? 'tunnel probe' : 'external client';
+          const fields = `method=${observation.method} outcome=${observation.outcome}` +
+            (observation.toolCount === undefined ? '' : ` tools=${observation.toolCount}`) +
+            (observation.definitionHash ? ` schema=${observation.definitionHash}` : '') +
+            (observation.rpcErrorCode === undefined ? '' : ` rpc_error=${observation.rpcErrorCode}`);
+          const failed = observation.outcome !== 'success' && observation.outcome !== 'unparsed' || observation.toolCount === 0;
+          (failed ? logWarn : logInfo)(`catalog mcp/${route.id} ${fields} (${who})`);
+          if (!selfTest && !tunnelProbe && observation.method === 'tools/list') {
+            catalogResponses.set(route.id, { ...observation, at: publication.completedAt });
+          }
+        } catch { /* Diagnostics cannot break HTTP completion. */ }
+      };
+      if (res.writableFinished) completed(); else res.once('finish', completed);
+    }), { onerror: error => logError(`MCP handler error (${route.id}): ${error.message}`) });
     const handle = (body?: unknown): void => {
       withInboundRequestId(
         requestId,
-        () => withInboundOpenAiSession(openAiSession, () => void route.handler(req, res, body)),
+        () => withInboundOpenAiSession(openAiSession, () => void handler(req, res, body)),
         timing,
         publication
       );

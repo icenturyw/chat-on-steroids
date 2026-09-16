@@ -29,8 +29,8 @@ beforeEach(() => {
 function prove(requestId = 'request-a', conversationId = 'chat-a', sessionId = 'session-a') {
   return observeRequestCorrelation({ requestId, conversationId, sessionId, messageId: 'message', tool: '', observedAt: Date.now() });
 }
-const invoke = (requestId = 'request-a', run = async () => ok('result')) => dispatch('read', {}, null, requestId, 'core', run);
-const refused = (requestId = 'request-a') => dispatch('agents', {}, null, requestId, 'core', () =>
+const invoke = (requestId = 'request-a', run = async () => ok('result')) => dispatch('read', {}, null, null, requestId, 'core', run);
+const refused = (requestId = 'request-a') => dispatch('agents', {}, null, null, requestId, 'core', () =>
   guard('agents', async () => { throw new IdentityLostError(); }));
 const notice = (result: ToolResult) => result.content.filter(part => part.type === 'text' && part.text.includes('--- Identity recovered ---'));
 
@@ -86,8 +86,8 @@ it('rechecks a block applied during the final ownership read', async () => {
 });
 
 it('keeps a nested refusal visible only on the outer result, even when the script filters it', async () => {
-  const result = await dispatch('exec', {}, null, 'request-a', 'core', async () => {
-    const child = await dispatch('update_plan', {}, null, 'request-a', 'core', async () => failIdentity('No plan changed'), currentCall()!);
+  const result = await dispatch('exec', {}, null, null, 'request-a', 'core', async () => {
+    const child = await dispatch('update_plan', {}, null, null, 'request-a', 'core', async () => failIdentity('No plan changed'), currentCall()!);
     expect(notice(child)).toHaveLength(0);
     prove(); return ok('filtered');
   });
@@ -122,6 +122,6 @@ it('defers the notice when the result has spent its text budget', async () => {
 });
 
 it('does not invent ownership for a headerless refusal', async () => {
-  await dispatch('agents', {}, null, null, 'core', async () => failIdentity('No agent operation'));
+  await dispatch('agents', {}, null, null, null, 'core', async () => failIdentity('No agent operation'));
   prove(); expect(notice(await invoke())).toHaveLength(0);
 });

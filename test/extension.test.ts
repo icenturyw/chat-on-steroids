@@ -863,8 +863,9 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     expect(worker.tabsReload).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['unresolved', 'resolved-during-scan', 'claim-unavailable'] as const)(
-    'claims attribution recovery after the tab scan: %s', async (mode) => {
+  it.each(['unattributed', 'assistant-error'].flatMap(reason =>
+    ['unresolved', 'resolved-during-scan', 'claim-unavailable'].map(mode => ({ reason, mode }))))(
+    'claims $reason recovery after the tab scan: $mode', async ({ reason, mode }) => {
       let armed = false;
       let handed = false;
       let resolved = false;
@@ -883,7 +884,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
           if (armed && !handed) {
             handed = true;
             trace.push('handout');
-            return response(200, { repairs: [{ conversationId: CHAT, token: 'attribution-attempt', requiresClaim: true }] });
+            return response(200, { repairs: [{ conversationId: CHAT, token: 'attribution-attempt', reason, requiresClaim: true }] });
           }
           return response(200, { repairs: [] });
         }
@@ -1800,7 +1801,7 @@ describe('extension command delivery', () => {
     const session = new FakeStorageArea();
     const worker = loadWorker({ local, session });
     worker.tabsQuery.mockResolvedValueOnce([{ id: 41 }]);
-    worker.tabsSendMessage.mockResolvedValueOnce({ ok: true, recorderVersion: 11 });
+    worker.tabsSendMessage.mockResolvedValueOnce({ ok: true, recorderVersion: 13 });
 
     await worker.installed('update');
 
@@ -1931,7 +1932,7 @@ describe('extension revival delivery', () => {
 
   const liveRecorder = async (_tabId: number, message: Record<string, unknown>) =>
     message.type === 'clf-recorder-ping'
-      ? { ok: true, recorderVersion: 11 }
+      ? { ok: true, recorderVersion: 13 }
       : { ok: true, claimed: true };
 
   it('scans before opening and routes to the oldest exact worker tab', async () => {

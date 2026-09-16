@@ -170,6 +170,117 @@ describe('connection surface state', () => {
     vi.resetModules();
   });
 
+  it('binds a quick Cloudflare tunnel to the configured stable localhost port', async () => {
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+
+    expect(mocks.endpointOptions).toEqual({ port: 28_767 });
+    expect(mocks.tunnelOptions).toMatchObject({
+      localUrl: 'http://127.0.0.1:28767/mcp/core/core-token',
+      apiKey: null,
+      cloudflareToken: null
+    });
+  });
+
+  it('reports a clear error when the Cloudflare local MCP port is already occupied', async () => {
+    mocks.endpointStartError = Object.assign(new Error('listen EADDRINUSE'), { code: 'EADDRINUSE' });
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+
+    expect(mocks.starts).toBe(0);
+    expect(connection.getStatus()).toMatchObject({
+      state: 'tunnel-unavailable',
+      detail: 'Cloudflare local MCP port 28767 is already in use. Choose another Local MCP port.'
+    });
+  });
+
+  it('persists one MCP path token per surface and reuses them after a module restart', async () => {
+    const firstConnection = await import('../src/main/connection.js');
+
+    await firstConnection.connect();
+    const firstTokens = { ...mocks.surfaceTokens } as Record<string, string>;
+    expect(firstTokens.core).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(firstTokens.desktop).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(firstTokens.plugins).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(firstTokens.core).not.toBe(firstTokens.desktop);
+    expect(firstTokens.core).not.toBe(firstTokens.plugins);
+    expect(firstTokens.desktop).not.toBe(firstTokens.plugins);
+    expect(mocks.secrets.mcpCorePathToken).toBe(firstTokens.core);
+    expect(mocks.secrets.mcpDesktopPathToken).toBe(firstTokens.desktop);
+    expect(mocks.secrets.mcpPluginsPathToken).toBe(firstTokens.plugins);
+
+    await firstConnection.disconnect();
+    vi.resetModules();
+    const restartedConnection = await import('../src/main/connection.js');
+    await restartedConnection.connect();
+
+    expect(mocks.surfaceTokens).toEqual(firstTokens);
+  });
+
+  it('binds a named Cloudflare tunnel to its configured localhost port and fixed hostname', async () => {
+    mocks.config.tunnel.cloudflareMode = 'named';
+    mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com/';
+    mocks.config.tunnel.cloudflareLocalPort = 28_767;
+    mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+
+    expect(mocks.endpointOptions).toEqual({ port: 28_767, publicHostname: 'mcp.example.com' });
+    expect(mocks.tunnelOptions).toMatchObject({
+      localUrl: 'http://127.0.0.1:28767/mcp/core/core-token',
+      apiKey: null,
+      cloudflareToken: 'named-token-secret'
+    });
+  });
+
+  it('refuses an invalid named Cloudflare origin before opening the local endpoint', async () => {
+    mocks.config.tunnel.cloudflareMode = 'named';
+    mocks.config.tunnel.cloudflarePublicUrl = 'http://mcp.example.com';
+    mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+
+    expect(mocks.endpointStartReached).not.toHaveBeenCalled();
+    expect(connection.getStatus()).toMatchObject({
+      state: 'tunnel-unavailable',
+      detail: 'Enter the existing Cloudflare HTTPS origin, for example https://mcp.example.com.'
+    });
+  });
+
+  it('reconnects when named Cloudflare routing changes but ignores a cosmetic trailing slash', async () => {
+    mocks.config.tunnel.cloudflareMode = 'named';
+    mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com';
+    mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+    expect(mocks.starts).toBe(1);
+
+    mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com/';
+    await connection.applySettings();
+    expect(mocks.starts).toBe(1);
+
+    mocks.config.tunnel.cloudflareLocalPort = 28_768;
+    await connection.applySettings();
+    expect(mocks.starts).toBe(2);
+    expect(mocks.endpointOptions).toEqual({ port: 28_768, publicHostname: 'mcp.example.com' });
+  });
+
+  it('reconnects a quick Cloudflare tunnel when its stable local port changes', async () => {
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+    expect(mocks.starts).toBe(1);
+    expect(mocks.endpointOptions).toEqual({ port: 28_767 });
+
+    mocks.config.tunnel.cloudflareLocalPort = 28_768;
+    await connection.applySettings();
+
+    expect(mocks.starts).toBe(2);
     expect(mocks.endpointOptions).toEqual({ port: 28_768 });
   });
 

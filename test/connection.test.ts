@@ -40,10 +40,10 @@ const mocks = vi.hoisted(() => {
     report: null as null | ((report: Record<string, unknown>) => void),
     starts: 0,
     prewarm: vi.fn(async () => undefined),
-    endpointStop: vi.fn(async (_options?: { forceAfterMs?: number }) => undefined),
+    endpointStop: vi.fn(async (_options?: { forceAfterMs?: number }): Promise<void> => undefined),
     endpointOptions: null as null | { port?: number; publicHostname?: string },
     surfaceTokens: null as null | Record<string, string>,
-    publication: vi.fn((surface: string, observe: (name: string, version: string, instructions: string, tools: unknown[]) => void) => observe('Chat On Steroids ' + surface, '1', 'instructions', [])),
+    publication: vi.fn((surface: string, observe: (name: string, version: string, instructions: string, tools: unknown[]) => void) => observe(`Chat On Steroids ${surface}`, '1', 'instructions', [])),
     endpointStartGate: null as Promise<void> | null,
     endpointStartError: null as NodeJS.ErrnoException | null,
     endpointStartReached: vi.fn(),
@@ -136,13 +136,13 @@ describe('connection surface state', () => {
     mocks.surfaceTokens = null;
     mocks.endpointStartGate = null;
     mocks.endpointStartError = null;
+    mocks.tunnelOptions = null;
+    mocks.secrets = {};
     mocks.tunnelStartReached.mockClear();
     mocks.tunnelStartGate = null;
     mocks.tunnelStop.mockClear();
-    mocks.tunnelOptions = null;
     mocks.secretReached.mockClear();
     mocks.secretGate = null;
-    mocks.secrets = {};
     Object.assign(mocks.caps, {
       browse: true,
       search: true,
@@ -170,25 +170,22 @@ describe('connection surface state', () => {
     vi.resetModules();
   });
 
-  it('binds a quick Cloudflare tunnel to the configured stable localhost port', async () => {
+  it('binds Cloudflare quick tunnels to the configured local MCP port', async () => {
     const connection = await import('../src/main/connection.js');
-
     await connection.connect();
-
     expect(mocks.endpointOptions).toEqual({ port: 28_767 });
     expect(mocks.tunnelOptions).toMatchObject({
       localUrl: 'http://127.0.0.1:28767/mcp/core/core-token',
       apiKey: null,
       cloudflareToken: null
     });
+    await connection.disconnect();
   });
 
   it('reports a clear error when the Cloudflare local MCP port is already occupied', async () => {
     mocks.endpointStartError = Object.assign(new Error('listen EADDRINUSE'), { code: 'EADDRINUSE' });
     const connection = await import('../src/main/connection.js');
-
     await connection.connect();
-
     expect(mocks.starts).toBe(0);
     expect(connection.getStatus()).toMatchObject({
       state: 'tunnel-unavailable',
@@ -198,7 +195,6 @@ describe('connection surface state', () => {
 
   it('persists one MCP path token per surface and reuses them after a module restart', async () => {
     const firstConnection = await import('../src/main/connection.js');
-
     await firstConnection.connect();
     const firstTokens = { ...mocks.surfaceTokens } as Record<string, string>;
     expect(firstTokens.core).toMatch(/^[A-Za-z0-9_-]{43}$/);
@@ -210,13 +206,12 @@ describe('connection surface state', () => {
     expect(mocks.secrets.mcpCorePathToken).toBe(firstTokens.core);
     expect(mocks.secrets.mcpDesktopPathToken).toBe(firstTokens.desktop);
     expect(mocks.secrets.mcpPluginsPathToken).toBe(firstTokens.plugins);
-
     await firstConnection.disconnect();
     vi.resetModules();
     const restartedConnection = await import('../src/main/connection.js');
     await restartedConnection.connect();
-
     expect(mocks.surfaceTokens).toEqual(firstTokens);
+    await restartedConnection.disconnect();
   });
 
   it('binds a named Cloudflare tunnel to its configured localhost port and fixed hostname', async () => {
@@ -225,15 +220,14 @@ describe('connection surface state', () => {
     mocks.config.tunnel.cloudflareLocalPort = 28_767;
     mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
     const connection = await import('../src/main/connection.js');
-
     await connection.connect();
-
     expect(mocks.endpointOptions).toEqual({ port: 28_767, publicHostname: 'mcp.example.com' });
     expect(mocks.tunnelOptions).toMatchObject({
       localUrl: 'http://127.0.0.1:28767/mcp/core/core-token',
       apiKey: null,
       cloudflareToken: 'named-token-secret'
     });
+    await connection.disconnect();
   });
 
   it('refuses an invalid named Cloudflare origin before opening the local endpoint', async () => {
@@ -241,9 +235,7 @@ describe('connection surface state', () => {
     mocks.config.tunnel.cloudflarePublicUrl = 'http://mcp.example.com';
     mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
     const connection = await import('../src/main/connection.js');
-
     await connection.connect();
-
     expect(mocks.endpointStartReached).not.toHaveBeenCalled();
     expect(connection.getStatus()).toMatchObject({
       state: 'tunnel-unavailable',
@@ -256,32 +248,28 @@ describe('connection surface state', () => {
     mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com';
     mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
     const connection = await import('../src/main/connection.js');
-
     await connection.connect();
     expect(mocks.starts).toBe(1);
-
     mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com/';
     await connection.applySettings();
     expect(mocks.starts).toBe(1);
-
     mocks.config.tunnel.cloudflareLocalPort = 28_768;
     await connection.applySettings();
     expect(mocks.starts).toBe(2);
     expect(mocks.endpointOptions).toEqual({ port: 28_768, publicHostname: 'mcp.example.com' });
+    await connection.disconnect();
   });
 
   it('reconnects a quick Cloudflare tunnel when its stable local port changes', async () => {
     const connection = await import('../src/main/connection.js');
-
     await connection.connect();
     expect(mocks.starts).toBe(1);
     expect(mocks.endpointOptions).toEqual({ port: 28_767 });
-
     mocks.config.tunnel.cloudflareLocalPort = 28_768;
     await connection.applySettings();
-
     expect(mocks.starts).toBe(2);
     expect(mocks.endpointOptions).toEqual({ port: 28_768 });
+    await connection.disconnect();
   });
 
   it('reconnects with the selected setup key even when both profiles use the same tunnel ID', async () => {
@@ -368,6 +356,66 @@ describe('connection surface state', () => {
     expect(mocks.endpointStop).toHaveBeenLastCalledWith({ forceAfterMs: 30_000 });
   });
 
+  it('publishes Disconnect immediately and coalesces 100 clicks while accepted work drains', async () => {
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+    let release!: () => void;
+    mocks.endpointStop.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const stopping = connection.disconnect();
+    expect(connection.getStatus().state).toBe('disconnecting');
+    for (let click = 0; click < 100; click++) expect(connection.disconnect()).toBe(stopping);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    mocks.report?.({ state: 'connected', detail: 'late health report' });
+    expect(connection.getStatus().state).toBe('disconnecting');
+    expect(mocks.tunnelStop).not.toHaveBeenCalled();
+    release();
+    await stopping;
+    expect(mocks.endpointStop).toHaveBeenCalledTimes(1);
+    expect(mocks.tunnelStop).toHaveBeenCalledTimes(1);
+    expect(connection.getStatus().state).toBe('disconnected');
+    await connection.connect();
+    expect(connection.getStatus().state).toBe('connected');
+  });
+
+  it('lets final shutdown bound the ordinary drain already ahead of it in the lifecycle queue', async () => {
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    mocks.endpointStop.mockImplementationOnce(() => gate);
+    const stopping = connection.disconnect();
+    await vi.waitFor(() => expect(mocks.endpointStop).toHaveBeenCalledTimes(1));
+    mocks.endpointStop.mockImplementationOnce(async (options) => {
+      expect(options).toEqual({ forceAfterMs: 30_000 });
+      release();
+    });
+    await connection.shutdownConnection();
+    await stopping;
+    expect(connection.getStatus().state).toBe('disconnected');
+  });
+
+  it('cancels a queued Connect and permits an explicit Connect after Disconnect', async () => {
+    const connection = await import('../src/main/connection.js');
+    const connecting = connection.connect();
+    const stopping = connection.disconnect();
+    await Promise.all([connecting, stopping]);
+    expect(mocks.starts).toBe(0);
+    const disconnecting = connection.disconnect();
+    const reconnecting = connection.connect();
+    await Promise.all([disconnecting, reconnecting]);
+    expect(connection.getStatus().state).toBe('connected');
+  });
+
+  it('bounds Disconnect when final shutdown arrives before its queued drain starts', async () => {
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+    const stopping = connection.disconnect();
+    const shutdown = connection.shutdownConnection();
+    await Promise.all([stopping, shutdown]);
+    expect(mocks.endpointStop).toHaveBeenCalledWith({ forceAfterMs: 30_000 });
+    expect(connection.getStatus().state).toBe('disconnected');
+  });
+
   it('cancels an MCP endpoint that finishes starting after final shutdown was requested', async () => {
     let releaseEndpoint!: () => void;
     mocks.endpointStartGate = new Promise<void>((resolve) => {
@@ -421,6 +469,26 @@ describe('connection surface state', () => {
 
     expect(mocks.starts).toBe(0);
     expect(mocks.endpointStop).toHaveBeenCalledWith({ forceAfterMs: 30_000 });
+    expect(connection.getStatus().state).toBe('disconnected');
+  });
+
+  it('cancels tunnel startup through the same graceful endpoint-before-tunnel drain', async () => {
+    let releaseTunnel!: () => void;
+    mocks.tunnelStartGate = new Promise<void>(resolve => { releaseTunnel = resolve; });
+    const connection = await import('../src/main/connection.js');
+    const connecting = connection.connect();
+    await vi.waitFor(() => expect(mocks.tunnelStartReached).toHaveBeenCalledTimes(1));
+    let releaseDrain!: () => void;
+    mocks.endpointStop.mockImplementationOnce(() => new Promise<void>(resolve => { releaseDrain = resolve; }));
+    const stopping = connection.disconnect();
+    releaseTunnel();
+    await vi.waitFor(() => expect(releaseDrain).toBeTypeOf('function'));
+    expect(mocks.endpointStop).toHaveBeenLastCalledWith();
+    expect(mocks.tunnelStop).not.toHaveBeenCalled();
+    expect(connection.getStatus().state).toBe('disconnecting');
+    releaseDrain();
+    await Promise.all([connecting, stopping]);
+    expect(mocks.tunnelStop).toHaveBeenCalledTimes(1);
     expect(connection.getStatus().state).toBe('disconnected');
   });
 

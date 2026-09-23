@@ -30,6 +30,8 @@ let endpoint: McpEndpoint | null = null;
 /** Retain custody while draining so final shutdown can bound that same stop. */
 let drainingEndpoint: McpEndpoint | null = null;
 let pendingDisconnect: Promise<void> | null = null;
+/** All callers join one teardown, including final shutdown overtaking a stalled connect. */
+let pendingTeardown: Promise<void> | null = null;
 /** The Core tunnel. Also the only tunnel on the cloudflared and manual paths. */
 let tunnel: TunnelHandle | null = null;
 /** Independent optional tunnel lifetimes on the OpenAI path. */
@@ -361,8 +363,12 @@ async function connectImpl(): Promise<void> {
       }
       throw error;
     }
+    if (shutdownRequested) {
+      await startedEndpoint.stop({ forceAfterMs: 30_000 }).catch(() => {});
+      return;
+    }
     endpoint = startedEndpoint;
-    if (shutdownRequested || generation !== connectionGeneration) {
+    if (generation !== connectionGeneration) {
       await disconnectImpl();
       return;
     }
@@ -414,8 +420,15 @@ async function connectImpl(): Promise<void> {
         }
       }
     });
+    if (shutdownRequested) {
+      // Final shutdown can finish without waiting for startup. A late handle still
+      // belongs to this attempt, and its transport must outlive the accepted drain.
+      await disconnectImpl(30_000);
+      await startedTunnel.stop().catch(() => {});
+      return;
+    }
     tunnel = startedTunnel;
-    if (shutdownRequested || generation !== connectionGeneration) {
+    if (generation !== connectionGeneration) {
       await disconnectImpl();
       return;
     }
@@ -477,6 +490,11 @@ async function startOptionalTunnel(
         });
       }
     });
+    if (shutdownRequested) {
+      await disconnectImpl(30_000);
+      await started.stop().catch(() => {});
+      return;
+    }
     // The serialized teardown owns retirement, including when Disconnect arrived
     // during startup. Keep the transport until its accepted responses drain.
     lifetime.handle = started;
@@ -556,7 +574,11 @@ export function applySettings(): Promise<void> {
   return enqueueLifecycle(async () => { await applySettingsImpl(); for (const surface of SURFACE_LIST) refreshPluginPublication(surface.id); });
 }
 
-async function disconnectImpl(endpointForceAfterMs?: number): Promise<void> {
+function disconnectImpl(endpointForceAfterMs?: number): Promise<void> {
+  return pendingTeardown ??= disconnectResources(endpointForceAfterMs).finally(() => { pendingTeardown = null; });
+}
+
+async function disconnectResources(endpointForceAfterMs?: number): Promise<void> {
   for (const surface of SURFACE_LIST) unpublishPluginSurface(surface.id);
   // Invalidate callbacks first; stopping a child can itself cause exit/health events.
   connectionGeneration += 1;
@@ -624,7 +646,9 @@ export function shutdownConnection(): Promise<void> {
   connectionGeneration += 1;
   // Do not enqueue the force deadline behind the ordinary drain it must bound.
   void drainingEndpoint?.stop({ forceAfterMs: 30_000 }).catch(() => {});
-  return enqueueLifecycle(() => disconnectImpl(30_000));
+  // Quit is terminal: it must not inherit an unfinished startup/keychain wait.
+  // Join the whole teardown if it is already running, not just its HTTP drain.
+  return disconnectImpl(30_000);
 }
 
 /** The running tunnel's own local health address, for the self-test. Null if none. */

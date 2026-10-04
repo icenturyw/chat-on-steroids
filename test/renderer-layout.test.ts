@@ -34,17 +34,17 @@ beforeAll(async () => {
     fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'chat.ts'), 'utf8')
   ]);
   document = new JSDOM(html).window.document;
-  css = styles;
+  css = styles + '\n' + await fs.readFile(path.join(process.cwd(), 'src/renderer/settings.css'), 'utf8');
   chatSource = chat;
 });
 
 it('searches whole settings sections without empty headings, orphaned controls or lost conditional visibility', () => {
   const view = document.querySelector<HTMLElement>('[data-view="settings"]')!;
-  const sections = [...view.querySelectorAll<HTMLElement>('.settings-section-title')];
+  const sections = [...view.querySelectorAll<HTMLElement>('.automation-section-head')];
   const conditional = document.getElementById('goalModels')!;
   expect(conditional.hidden).toBe(true);
   filterSettingsSections(view, '  SESSION FINISH  ');
-  expect(sections.filter(section => !section.hidden).map(section => section.textContent)).toEqual(['Keep the turn open']);
+  expect(sections.filter(section => !section.hidden).map(section => section.querySelector('h2')?.textContent)).toEqual(['Keep the turn open']);
   for (const section of sections) expect((section.nextElementSibling as HTMLElement).hidden).toBe(section.hidden);
   expect(document.getElementById('finishTool')!.closest('.pane')!.hasAttribute('hidden')).toBe(false);
   expect(document.getElementById('goalKey')!.closest('.pane')!.hasAttribute('hidden')).toBe(true);
@@ -62,16 +62,81 @@ it('limits the existing tool-detail preference to handoff briefs', () => {
   expect(toggle.type).toBe('checkbox');
   expect(toggle.checked).toBe(false);
   expect(toggle.closest('label')?.textContent).toContain('Include tool details in handoffs');
-  expect(toggle.closest('label')?.textContent).toContain('Goal and Loop use user messages and assistant updates and answers');
+  expect(toggle.closest('label')?.textContent).toContain('Compact & Resume briefs keep tool calls and their results');
+  expect(toggle.closest('label')?.textContent).toContain("Goal and Loop always read only your messages and the assistant's updates and answers");
   expect(chatSource).toContain("includeToolCalls: $<HTMLInputElement>('goalIncludeToolCalls').checked");
   expect(chatSource).toContain("applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls')");
 });
 
-it('keeps the context circle in the gear group rather than an auto-placed composer grid cell', () => {
+it('places context before the model picker and keeps native compaction actions in its dialog', () => {
   const group = document.getElementById('composerSettings')!.parentElement!;
-  expect(group.classList.contains('composer-options')).toBe(true);
-  expect(document.getElementById('contextMeter')!.parentElement).toBe(group);
+  expect(group.classList.contains('composer-primary-controls')).toBe(true);
+  expect(document.getElementById('contextMeter')!.nextElementSibling?.id).toBe('modelMenu');
+  expect(document.getElementById('compactSession')!.closest('[role=dialog]')?.id).toBe('contextMeterInfo');
+  expect(document.getElementById('cancelCompaction')!.closest('[role=dialog]')?.id).toBe('contextMeterInfo');
   expect(document.getElementById('contextMeterInfo')!.parentElement?.id).toBe('contextMeter');
+});
+
+it('centers the accessible Chats refresh icon without an extra grid text row', () => {
+  const refresh = document.getElementById('chatRefresh')!;
+  expect(refresh.getAttribute('aria-label')).toBe('Refresh chats');
+  expect(refresh.children).toHaveLength(1);
+  expect(refresh.firstElementChild?.matches('i.ico.ph.ph-arrow-clockwise[aria-hidden="true"]')).toBe(true);
+  expect(refresh.textContent?.trim()).toBe('');
+});
+
+it('uses the fork back-to-chat control and separates the Usage cost sections', async () => {
+  const back = document.getElementById('backToChat')!;
+  expect(back.querySelector('.ph-arrow-left')).not.toBeNull();
+  expect(back.querySelector('span')?.textContent).toBe('Back to chat');
+  const costCaption = document.getElementById('usageCost')!;
+  expect(costCaption.closest('.settings-section-head')?.querySelector('h2')?.textContent).toBe('Cost estimate per day');
+  expect(document.querySelectorAll('#usageCost')).toHaveLength(1);
+  expect(css).toContain('.usage-sections { display: grid; gap: 24px; }');
+  expect(css).toContain('.usage-section > .settings-section-head { min-height: 0; }');
+  const usage = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'usage.ts'), 'utf8');
+  expect(usage).toContain("el('section', 'usage-days-model')");
+  expect(usage).toContain("el('section', 'usage-days-daily')");
+  expect(css).toMatch(/\.usage-days-model\s*\{[^}]*padding: 0 18px 18px;/);
+  expect(css).toMatch(/\.usage-days-daily\s*\{[^}]*border-top: 1px solid var\(--line\);/);
+});
+
+it('uses the robot for Sub-agents in Workspace as well as settings navigation', async () => {
+  const main = await fs.readFile(path.join(process.cwd(), 'src/renderer/main.ts'), 'utf8');
+  expect(main).toContain("groupShell('agents', 'Sub-agents', 'i-agents', enabled)");
+  expect(document.querySelector('#tabs [data-tab="settings"] .ph-robot')).not.toBeNull();
+});
+
+it('keeps the fork settings spacing for empty folders and flat Setup connectors', () => {
+  expect(css).toMatch(/#rootsEmpty\s*\{[^}]*padding: 10px 14px;[^}]*line-height: 1\.5;/);
+  expect(css).toMatch(/\.connectors\s*\{[^}]*gap: 0;[^}]*margin-top: 16px;/);
+  expect(css).toMatch(/\.connector\s*\{\s*border-top: 1px solid var\(--line\);\s*padding: 16px 0;/);
+  expect(css).toContain('.connector:first-child { border-top: 0; }');
+});
+
+it('does not let the old Workspace scroll override disable rounded surface clipping', () => {
+  expect(css).not.toMatch(/\[data-panel='home'\] \.scroll\s*\{[^}]*overflow:\s*visible/);
+  expect(css).toMatch(/\.setup-profile-option\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) 30px;/);
+});
+
+it('keeps dock tabs and Files actions on one horizontally scrollable row without visible scrollbars', () => {
+  expect(css).toMatch(/\.work-dock-tabs\s*\{[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*none;/);
+  expect(css).toMatch(/\.work-dock-tabs::-webkit-scrollbar\s*\{\s*display:\s*none;/);
+  expect(css).toMatch(/\.file-panel-toolbar-actions\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*none;/);
+  expect(css).toMatch(/\.file-panel-toolbar-actions::-webkit-scrollbar\s*\{\s*display:\s*none;/);
+  expect(css).toMatch(/\.file-panel-toolbar > \.file-panel-refresh\s*\{\s*flex:\s*0 0 28px;/);
+  expect(css).toMatch(/\.review-panel \.file-changes-header-content\s*\{[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*none;/);
+  expect(css).toMatch(/\.review-panel \.file-changes-header-content::-webkit-scrollbar\s*\{\s*display:\s*none;/);
+  expect(css).toMatch(/\.work-dock-tab:is\(\.is-selected, :hover, :focus-within\)\s*\{\s*background:\s*var\(--hover\);/);
+  expect(css).toMatch(/\.work-dock-bar \.work-dock-tab > \.btn:hover:not\(:disabled\)\s*\{\s*background:\s*transparent;/);
+  expect(css).toMatch(/\.work-dock-tab > \.btn:focus-visible\s*\{\s*outline:/);
+});
+
+it('keeps unified docks out of Settings without clearing their chat state', () => {
+  expect(css).toContain(".app[data-screen='settings'] .work-dock { display: none; }");
+  expect(css).toContain(".app[data-screen='settings'] [data-panel='chat'].has-work-dock { grid-template-columns: minmax(0, 1fr); }");
+  expect(css).toContain(".app[data-screen='settings'] .work-panel-resize { display: none; }");
+  expect(css).toContain(".app[data-screen='chat'] .work-dock[hidden].is-closing { display: flex !important; }");
 });
 
 it('does not expose a periodic Astra continuation outside session_finish', () => {
@@ -97,11 +162,21 @@ describe('the session card header', () => {
    * because the chat is what writes the brief — a button here would be a second way to
    * start the one thing that must happen exactly once.
    */
-  it('keeps global connection status out of the chat header and in the sidebar footer', () => {
+  it('keeps global theme and connection actions in the title bar while details stay in the sidebar popover', () => {
     const header = document.querySelector('#chatTitle')!.closest('header')!;
+    const topbar = document.querySelector('.app-topbar')!;
+    const theme = document.getElementById('themeBtn')!;
+    const topbarConnection = document.getElementById('headerConnect')!;
     const connection = document.getElementById('sidebarConnection')!;
     const footer = connection.closest('.sidebar-bottom')!;
     expect(header.contains(connection)).toBe(false);
+    expect(header.contains(theme)).toBe(false);
+    expect(header.contains(topbarConnection)).toBe(false);
+    expect(topbar.contains(theme)).toBe(true);
+    expect(topbar.contains(topbarConnection)).toBe(true);
+    expect(theme.getAttribute('aria-label')).toBe('Switch to light mode');
+    expect(theme.querySelector('.ph-sun')).not.toBeNull();
+    expect(rule('.app-topbar > .btn, .view-menu')).toContain('-webkit-app-region: no-drag');
     expect(footer).not.toBeNull();
     expect([...footer.children].map((node) => (node as HTMLElement).id || (node as HTMLElement).className)).toEqual([
       'workspaceSettings',
@@ -113,8 +188,9 @@ describe('the session card header', () => {
     expect(rule('.connection-popover::-webkit-scrollbar-track')).toContain('margin-block: 10px');
     expect(rule('#workspaceSettings')).toContain('height: 36px');
     expect(rule('.sidebar-connection')).toContain('width: 36px; height: 36px');
-    expect(document.getElementById('connectionAdvanced')).not.toBeNull();
-    expect(document.getElementById('connectionAdvancedGrid')).not.toBeNull();
+    expect(document.getElementById('connectionPopover')!.querySelector('details')).toBeNull();
+    expect(document.getElementById('connectionAdvanced')).toBeNull();
+    expect(document.getElementById('connectionPopoverVerified')).toBeNull();
     expect(document.getElementById('sessionControls')!.closest('#composerSettings')).not.toBeNull();
     expect(header.querySelector('.session-controls')).toBeNull();
   });
@@ -228,8 +304,8 @@ describe('the session-row chat actions', () => {
   });
 
   it('opens and blocks only recorded conversations, and never selects or deletes the adjacent row', () => {
-    expect(chatSource).toMatch(/if \(summary\.conversationId\)[\s\S]{0,2000}openSessionChat\(summary\.id\)/);
-    expect(chatSource).toMatch(/if \(summary\.conversationId\)[\s\S]{0,2000}toggleSessionBlock\(summary\.id/);
+    expect(chatSource).toMatch(/if \(summary\.conversationId\)[\s\S]*?openSessionChat\(summary\.id\)/);
+    expect(chatSource).toMatch(/if \(summary\.conversationId\)[\s\S]*?toggleSessionBlock\(summary\.id/);
     expect(chatSource).toMatch(/open\.addEventListener\('click',[\s\S]{0,120}event\.stopPropagation\(\)/);
     expect(chatSource).toMatch(/block\.addEventListener\('click',[\s\S]{0,120}event\.stopPropagation\(\)/);
   });
@@ -237,6 +313,11 @@ describe('the session-row chat actions', () => {
   it('keeps a block visible without hovering, because it is state and not just an action', () => {
     expect(rule('.session-status.is-failed')).toContain('background: var(--red)');
     expect(chatSource).toContain("ui(indicator, 'aria-label', () => t(status.text))");
+  });
+
+  it('uses the configured accent for working and unseen response state', () => {
+    expect(rule('.session-status.is-active, .session-status.is-working')).toContain('border-top-color: var(--accent)');
+    expect(rule('.session-status.is-unseen')).toContain('background: var(--accent)');
   });
 
   /**
@@ -247,7 +328,10 @@ describe('the session-row chat actions', () => {
    */
   it('blocks the Unattributed row through the one switch that can answer for it', () => {
     expect(chatSource).toMatch(
-      /if \(summary\.conversationId === null\)[\s\S]{0,1200}toggleUnattributedBlock\(!blocked\)/
+      /if \(summary\.conversationId === null\)[\s\S]{0,2200}toggleUnattributedBlock\(!blocked\)/
+    );
+    expect(chatSource).toMatch(
+      /strictChatAllowlist === true[\s\S]{0,300}actionBar\.append\(remove\)[\s\S]{0,120}return row/
     );
     expect(chatSource).toMatch(
       /toggleUnattributedBlock[\s\S]{0,400}\$<HTMLInputElement>\('allowUnattributedCalls'\)\.checked = !blocked/
@@ -299,7 +383,9 @@ describe('the chat panel cards', () => {
     // Subhead, scrolling conversation, shared plan/queue dock, composer and footer.
     const layoutChildren = [...card.children].filter(child => child.id !== 'chatSettingsBtn');
     expect(layoutChildren.length).toBe(5);
-    expect(document.getElementById('composerDock')!.firstElementChild?.id).toBe('agentPlan');
+    const dockBody = document.getElementById('composerDock')!.firstElementChild!;
+    expect(dockBody.classList.contains('composer-dock-body')).toBe(true);
+    expect(dockBody.firstElementChild?.id).toBe('agentPlan');
     expect(document.getElementById('inputQueue')!.closest('#chatBody')).not.toBeNull();
     expect(card.classList.contains('is-session')).toBe(true);
     expect(tracks("[data-panel='chat'] .card.is-session")).toHaveLength(layoutChildren.length);
@@ -430,6 +516,8 @@ describe('the settings sheet', () => {
     expect(order.indexOf('goalReasoning')).toBeLessThan(order.indexOf('goalPromptEdit'));
     // Closed until asked for: the catalogue is several hundred long and costs a round trip.
     expect(document.getElementById('goalModels')!.hasAttribute('hidden')).toBe(true);
+    expect(document.getElementById('handoffPromptPanel')!.hasAttribute('hidden')).toBe(true);
+    expect(document.getElementById('handoffPrompt')?.tagName).toBe('TEXTAREA');
     expect(document.getElementById('goalPromptPanel')!.hasAttribute('hidden')).toBe(true);
     expect(document.getElementById('goalPrompt')?.tagName).toBe('TEXTAREA');
   });
@@ -438,7 +526,14 @@ describe('the settings sheet', () => {
   it('asks for a single compaction threshold', () => {
     const pane = document.querySelector('.view[data-view="settings"]')!;
     const numbers = [...pane.querySelectorAll('input[type="number"]')].map((input) => input.id);
-    expect(numbers).toEqual(['maWorkers', 'autoCompactTokens']);
+    expect(numbers).toEqual(['maWorkers', 'globalMaWorkers', 'autoCompactTokens']);
+    const globalWorkers = document.getElementById('globalMaWorkers') as HTMLInputElement;
+    expect([globalWorkers.min, globalWorkers.max, globalWorkers.step]).toEqual(['0', '64', '1']);
+    const globalSetting = globalWorkers.closest('.setting')!;
+    expect(globalSetting.querySelector('b')?.textContent).toBe('Workers across all chats');
+    expect(globalSetting.querySelector('em')?.textContent).toBe(
+      'The most workers that may run at once over all your chats together. 0 means no extra limit; each chat still keeps the limit above.'
+    );
     for (const id of ['sessRecord', 'sessRetain', 'sessAdvisory', 'sessLimit']) {
       expect(document.getElementById(id), `#${id} is back`).toBeNull();
     }
@@ -460,6 +555,12 @@ describe('the settings sheet', () => {
         const variable = input.id === 'browserOverwrite' ? 'overwrite' : 'durations';
         expect(browserPreferencesSource).toContain(`('${input.id}')`);
         expect(browserPreferencesSource).toContain(`${variable}.addEventListener('change'`);
+        continue;
+      }
+      // Search narrows a transient provider listing; it is not an app setting and must never
+      // enter config. Keep the exception explicit and prove the local input listener exists.
+      if (input.id === 'goalModelSearch') {
+        expect(chatSource).toMatch(/const modelSearch = \$<HTMLInputElement>\('goalModelSearch'\);[\s\S]{0,260}modelSearch\.addEventListener\('input'/);
         continue;
       }
       // A credential is the one exception, and it is an exception on purpose: it is written
@@ -517,14 +618,19 @@ describe('the window as a whole', () => {
   });
 
   it('never scrolls sideways', () => {
-    // Wide authored tables/code may scroll locally; the surrounding app must not.
+    // Wide authored content and compact dock controls may scroll locally; the app must not.
     const horizontal = [...css.matchAll(/([^{}]+)\{[^{}]*overflow-x:\s*(?:auto|scroll)[^{}]*\}/g)];
     expect(horizontal.map(match => match[1]!.trim())).toEqual([
       '.msg.rich .markdown-table',
+      '.file-panel-toolbar-actions',
+      '.review-panel .file-changes-header-content',
       '.file-preview-markdown pre',
       '.file-preview-markdown-table',
       '.file-pdf-viewport',
-      '.terminal-tabs'
+      '.terminal-tabs',
+      '.work-dock-tabs',
+      '.usage-heatmap-surface',
+      '.usage-table-stack'
     ]);
     expect(css).not.toMatch(/overflow:\s*(auto|scroll)\s+/);
     // The one scrolling surface in the app is vertical only.

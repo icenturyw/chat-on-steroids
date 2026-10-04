@@ -2,17 +2,23 @@ import zhCN from './locales/zh-CN.json';
 import es from './locales/es.json';
 import zhTW from './locales/zh-TW.json';
 import ja from './locales/ja.json';
+import ko from './locales/ko.json';
 import tr from './locales/tr.json';
 import fr from './locales/fr.json';
+import ptPT from './locales/pt-PT.json';
+import ptBR from './locales/pt-BR.json';
+import de from './locales/de.json';
+import ru from './locales/ru.json';
+import vi from './locales/vi.json';
 
-export type Language = 'en' | 'es' | 'zh-CN' | 'zh-TW' | 'ja' | 'tr' | 'fr';
+export type Language = 'en' | 'es' | 'zh-CN' | 'zh-TW' | 'ja' | 'ko' | 'tr' | 'vi' | 'fr' | 'pt-PT' | 'pt-BR' | 'de' | 'ru';
 const STORAGE_KEY = 'cos.ui.language';
 type Catalog = Readonly<Record<string, string>>;
-const catalogs: Readonly<Record<Exclude<Language, 'en'>, Catalog>> = { es, 'zh-CN': zhCN, 'zh-TW': zhTW, ja, tr, fr };
+const catalogs: Readonly<Record<Exclude<Language, 'en'>, Catalog>> = { es, 'zh-CN': zhCN, 'zh-TW': zhTW, ja, ko, tr, vi, fr, 'pt-PT': ptPT, 'pt-BR': ptBR, de, ru };
 const sourceKeys = new Set(Object.values(catalogs).flatMap(catalog => Object.keys(catalog)));
 
 function parseLanguage(value: string | null | undefined): Language {
-  return value === 'es' || value === 'zh-CN' || value === 'zh-TW' || value === 'ja' || value === 'tr' || value === 'fr' ? value : 'en';
+  return value === 'es' || value === 'zh-CN' || value === 'zh-TW' || value === 'ja' || value === 'ko' || value === 'tr' || value === 'vi' || value === 'fr' || value === 'pt-PT' || value === 'pt-BR' || value === 'de' || value === 'ru' ? value : 'en';
 }
 
 export function isSimplifiedChineseLocale(locale: string): boolean {
@@ -37,6 +43,13 @@ if (typeof window !== 'undefined') {
 }
 
 export function currentLanguage(): Language { return language; }
+
+const languageListeners = new Set<() => void>();
+/** Runs after each language change, for copy that leaves this document (#855). */
+export function onLanguageChange(listener: () => void): () => void {
+  languageListeners.add(listener);
+  return () => { languageListeners.delete(listener); };
+}
 
 /** Translate only app-authored copy at explicit call sites. Arguments remain verbatim. */
 export function t(source: string, args: readonly unknown[] = []): string {
@@ -79,6 +92,9 @@ export function setLanguage(next: Language): void {
   try { window.localStorage.setItem(STORAGE_KEY, next); } catch { /* The current window can still change language. */ }
   document.documentElement.lang = next;
   syncLanguageControls();
+  for (const listener of languageListeners) {
+    try { listener(); } catch { /* One listener cannot block the repaint below. */ }
+  }
   // The document owns the live labels, including hidden settings and collapsed
   // history. Do not index every label ever created: sweeping WeakRefs during
   // rendering keeps their detached DOM trees alive until the job ends and makes

@@ -1,6 +1,8 @@
 import type { ReasoningEffort } from './session.js';
 import { WINDOWS_COMPUTER_READ_METHODS, WINDOWS_COMPUTER_INPUT_METHODS } from './windows-computer.js';
 import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from './browser-control.js';
+import type { CommandAllowlistSettings } from './command-allowlist.js';
+export type { CommandAllowlistSettings } from './command-allowlist.js';
 /** Types shared between the main process and the renderer. No runtime logic here. */
 
 /**
@@ -136,6 +138,10 @@ export type ChatBrowser = (typeof CHAT_BROWSERS)[number];
 export interface UiPrefs {
   /** Recover an unfinished silent executor turn only while Goal and Loop are both off. */
   autoContinue?: boolean;
+  /** Preferred account-observed model for a fresh ordinary chat; omitted keeps the catalog fallback. */
+  defaultChatModel?: string;
+  /** Preferred reasoning for a fresh ordinary chat; omitted keeps the model's normal fallback. */
+  defaultChatReasoning?: ReasoningEffort;
   /** Maintenance may reuse existing tabs but cannot open helpers or missing chats. */
   browserOnly?: boolean;
   backgroundChats?: boolean;
@@ -149,6 +155,19 @@ export interface UiPrefs {
   finishAction?: 'notify' | 'goal';
   finishLeadMinutes?: number;
   developerMode?: boolean;
+  /** Rotating joke words instead of "Working" in a chat's status line. Off by default. */
+  playfulStatus?: boolean;
+  /** Keep the chat at its end while it grows, here and on ChatGPT, until the reader scrolls up. On unless false. */
+  followOutput?: boolean;
+  /** Add the Chat On Steroids Core mention to the user's own prompts sent from the app. On unless false. */
+  mentionCore?: boolean;
+  /** The interface language the window last reported; the browser extension follows it. */
+  language?: import('./ui-language.js').UiLanguage;
+  /**
+   * The extension's own preferences as it last reported them stored. The app keeps them so a
+   * reinstalled extension, which starts with empty storage under a new id, gets them back.
+   */
+  browserPreferences?: { overwrite: boolean; durations: boolean };
   minimizeToTray: boolean;
   autoConnect: boolean;
   startAtLogin?: boolean;
@@ -193,6 +212,10 @@ export interface CompactionSettings {
   auto: boolean;
   /** Estimated recorded tokens at which automatic compaction fires. */
   autoTokens: number;
+  /** Editable content instructions for the brief; protocol/recovery framing stays code-owned. */
+  handoffPrompt: string;
+  /** How long the brief should be; absent means 'thorough', the shipped 10k–30k rules. */
+  handoffLength?: 'thorough' | 'standard' | 'short';
 }
 
 /**
@@ -299,22 +322,53 @@ export interface MultiAgentSettings {
   defaultModel?: string;
   defaultReasoning?: ReasoningEffort | '';
   enabled: boolean;
-  /** Upper bound on workers the prime agent may create. */
+  /** Upper bound on simultaneous slot-holding workers in one prime family. */
   maxWorkers: number;
+  /**
+   * Optional admission cap shared by every prime family. Zero means no global cap, preserving
+   * the historical per-family-only behavior. This limits worker admission only; it does not
+   * queue ordinary prompts, switch Goal work, or evict workers that are already running.
+   */
+  globalMaxWorkers?: number;
   /** Permit self-contained calls when browser evidence cannot identify their conversation. */
   allowUnattributedCalls: boolean;
+  /** Default-deny local tools to exact trusted conversations. */
+  strictChatAllowlist?: boolean;
   /**
    * Reopen/reload chats that are not Goal/Loop driven — workers, primes, plain chats that have
    * called tools — once when their tab disappears or goes silent. Goal/Loop chats are always
    * recovered, whatever this says.
    */
   recoverAgentTabs: boolean;
+  /**
+   * Hold a Goal/Loop chat's next automatic step until the workers it delegated to have
+   * stopped. Their reports land in the same chat, so deciding or sending before that reads a
+   * context that is about to change. Off by default; a chat with no workers is never held.
+   */
+  waitForSubAgents?: boolean;
+  /**
+   * Reclaim only terminal processes owned by an exactly identified worker that has remained
+   * sleeping beyond the runtime-retention threshold. Off by default; durable worker/chat
+   * identity and history are never reclaimed by this switch.
+   */
+  endSleepingWorkerProcesses?: boolean;
 }
 
 /** The user's own additions to what each MCP connector tells the model about itself. */
 export interface McpSettings {
   /** Appended to the Core and Desktop server instructions, or empty for none. */
   instructions: string;
+}
+
+/** The opt-in local control API for an agent watching this app (`src/main/control-api.ts`). */
+export interface ControlApiSettings {
+  /** Serve the loopback API and write its token to userData. Off unless the user turns it on. */
+  enabled: boolean;
+  /**
+   * Also let a caller with the token send and cancel messages through the outbox. Off unless the
+   * user turns it on, and never on while `enabled` is off: turning the API off revokes it.
+   */
+  allowActions: boolean;
 }
 
 export interface Config {
@@ -328,8 +382,10 @@ export interface Config {
   sessions: SessionSettings;
   compaction: CompactionSettings;
   multiAgent: MultiAgentSettings;
+  commandAllowlist: CommandAllowlistSettings;
   goal: GoalSettings;
   mcp: McpSettings;
+  controlApi: ControlApiSettings;
 }
 
 export type ConnectionState =
@@ -646,6 +702,12 @@ export function browserExtensionRequired(_config: Pick<Config, 'sessions' | 'mul
 export interface AppState {
   config: Config;
   status: ConnectionStatus;
+  /**
+   * Exact declaration fingerprints for connectors currently published by the local MCP server.
+   * Missing entries mean that surface is not published right now. These hashes describe the
+   * local contract only; they are not evidence that ChatGPT has refreshed its cached tools.
+   */
+  connectorSchemas: Partial<Record<SurfaceId, string>>;
   platform: PlatformInfo;
   /** Only packaged Windows builds may change the login item. */
   loginStartupAvailable?: boolean;

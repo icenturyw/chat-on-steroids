@@ -36,7 +36,9 @@ function harness() {
     listeners.set(type, rows.filter(row => !row.once));
     for (const row of rows) row.handler(event);
   };
-  const evaluate = (source = script) => runInNewContext(source, { window, document, location: { origin: 'https://chatgpt.com' }, URL, Date: Clock, TextDecoder,
+  window.dispatchEvent = (event: { type: string }) => { dispatch(event.type, event); return true; };
+  class MessageEvent { constructor(readonly type: string, init: Record<string, unknown>) { Object.assign(this, init); } }
+  const evaluate = (source = script) => runInNewContext(source, { window, document, location: { origin: 'https://chatgpt.com' }, URL, crypto, Date: Clock, TextDecoder, MessageEvent,
     setTimeout: (run: () => void, ms: number) => { timers.set(++timerId, { at: now + ms, run }); return timerId; },
     clearTimeout: (id: number) => timers.delete(id) });
   evaluate();
@@ -86,6 +88,21 @@ function harness() {
     socket: (url = 'wss://ws.chatgpt.com/ws') => new window.WebSocket(url),
     feed,
     feedSse,
+    resume: async (status = 404, conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      endpoint = 'https://chatgpt.com/backend-api/f/conversation/resume', method = 'POST', mime = 'application/json') => {
+      response = { url: endpoint, status, ok: status === 200, clone: () => { throw new Error('Do not read error bodies'); },
+        headers: { get: () => mime } };
+      const starts: unknown[] = [];
+      const listener = (event: any) => { if (event.data?.type === 'cos-resume-request') starts.push(event.data); };
+      window.addEventListener('message', listener);
+      const result = window.fetch(endpoint, { method, body: JSON.stringify({ conversation_id: conversationId, private: 'not projected' }) });
+      const synchronousStarts = starts.length;
+      const returned = await result;
+      expect(returned).toBe(response);
+      await Promise.resolve();
+      window.removeEventListener('message', listener);
+      return { starts, synchronousStarts };
+    },
     openSse: async () => {
       let resolve: (value: unknown) => void = () => {};
       let cancelled = false, clones = 0;
@@ -111,11 +128,50 @@ function harness() {
     currentFetch: () => window.fetch,
     holdNextBody: () => { let release = () => {}; nextBodyGate = new Promise<void>(resolve => { release = resolve; }); return () => release(); },
     advance: (ms: number) => { now += ms; for (const [id, timer] of timers) if (timer.at <= now) { timers.delete(id); timer.run(); } },
-    request: (source: unknown = window, origin = 'https://chatgpt.com') => dispatch('message', { source, origin, data: { type: 'cos-usage-request' } })
+    request: (source: unknown = window, origin = 'https://chatgpt.com') => dispatch('message', { source, origin, data: { type: 'cos-usage-request' } }),
+    askReplace: () => { window.__cosUsageReplace = true; }
   };
 }
 
 describe('MAIN-world usage projection', () => {
+  it('H2 observes an exact resume 404 without reading its body and captures request ownership synchronously', async () => {
+    const h = harness();
+    const { starts, synchronousStarts } = await h.resume();
+    expect(synchronousStarts).toBe(1);
+    expect(starts).toEqual([expect.objectContaining({ type: 'cos-resume-request', conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' })]);
+    expect(h.posts.filter(row => row.type === 'cos-resume-response')).toEqual([
+      { type: 'cos-resume-response', id: (starts[0] as any).id, conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', status: 404 }
+    ]);
+    expect(JSON.stringify(starts)).not.toContain('not projected');
+    h.request();
+    expect(h.posts.filter(row => row.type === 'cos-resume-response')).toHaveLength(1);
+  });
+
+  it.each([
+    ['foreign endpoint', 'https://elsewhere.example/backend-api/f/conversation/resume', 'POST', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
+    ['polling', 'https://chatgpt.com/backend-api/conversation/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', 'GET', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
+    ['GET resume', 'https://chatgpt.com/backend-api/f/conversation/resume', 'GET', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
+    ['invalid identity', 'https://chatgpt.com/backend-api/f/conversation/resume', 'POST', 'unknown']
+  ])('H2 ignores %s', async (_name, endpoint, method, conversationId) => {
+    const h = harness();
+    expect((await h.resume(404, conversationId, endpoint, method)).synchronousStarts).toBe(0);
+    expect(h.posts.filter(row => row.type === 'cos-resume-response')).toEqual([]);
+  });
+
+  it('H2 deduplicates a resume response when a provider wrapper delegates through the earlier observer', async () => {
+    const h = harness();
+    h.replaceFetch(true); h.ready();
+    await h.resume();
+    expect(h.posts.filter(row => row.type === 'cos-resume-response' && row.status === 404)).toHaveLength(1);
+  });
+
+  it.each(['application/json', 'text/event-stream; charset=utf-8'])('H2 projects successful SSE headers only for %s', async mime => {
+    const h = harness();
+    await h.resume(200, undefined, undefined, undefined, mime);
+    const [response] = h.posts.filter(row => row.type === 'cos-resume-response');
+    expect(response?.status).toBe(200);
+    expect(response?.streamOpened === true).toBe(mime.startsWith('text/event-stream'));
+  });
   it('keeps one current observer and refreshes a provider-replaced wrapper without extra active readers', async () => {
     const h = harness(), current = h.observer(), fetch = h.currentFetch();
     h.evaluate(); expect(h.observer()).toBe(current); expect(h.currentFetch()).toBe(fetch);
@@ -136,6 +192,64 @@ describe('MAIN-world usage projection', () => {
     await h.feedSse([`data: {"conversation_id":"${id}","metadata":{"request_id":"wfr_replaced"}}\n\n`]);
     expect(h.posts.filter(row => row.requestIds?.includes('wfr_replaced'))).toHaveLength(1);
   });
+  /**
+   * The join ChatGPT split across two events.
+   *
+   * The first event of a `/f/conversation` response is the stream handoff and carries
+   * `conversation_id`; the `input_message` event after it carries the request id and names no
+   * conversation at all. `readOrigin` required both sides on one event and the id in one of two
+   * places, so it abstained on every turn — and every MCP call then waited out the full
+   * twenty-second identity window and was filed under Unattributed activity.
+   *
+   * Reported with before/after measurements on the live page in #393: `identity_ms` 15001 -> 2,
+   * and no attribution repair reload afterwards. Long agentic turns also stopped being cut off as
+   * `stalled`, because their tool calls finally counted as progress on the turn that made them.
+   */
+  it('reports the model a user message was sent to from the send request, and nothing else', async () => {
+    const h = harness(), messageId = '2bd27eea-290d-444c-bc46-1487f143d603';
+    // Shape measured on the live page, 2026-09-28: POST /backend-api/f/conversation.
+    const body = JSON.stringify({ action: 'next', model: 'gpt-5-6-thinking', thinking_effort: 'high', conversation_id: null,
+      messages: [{ id: messageId, author: { role: 'user' }, content: { content_type: 'text', parts: ['private prompt'] } }] });
+    await h.feedSse([`data: ${JSON.stringify({ conversation_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' })}\n\n`], { method: 'POST', body });
+    const reports = h.posts.filter(row => row.type === 'cos-send-model');
+    expect(reports).toEqual([{ type: 'cos-send-model', model: 'gpt-5-6-thinking', messageIds: [messageId], observedAt: expect.any(Number) }]);
+    // The same request confirms the Send when ChatGPT redraws a new chat without its question (#942).
+    expect(h.posts.filter(row => row.type === 'cos-send-request'))
+      .toEqual([{ type: 'cos-send-request', messageIds: [messageId], observedAt: expect.any(Number) }]);
+    expect(JSON.stringify(h.posts)).not.toContain('private prompt');
+    // A malformed model or a non-user message proves nothing.
+    await h.feedSse([], { method: 'POST', body: JSON.stringify({ model: 'gpt 6 <b>', messages: [{ id: messageId, author: { role: 'user' } }] }) });
+    await h.feedSse([], { method: 'POST', body: JSON.stringify({ model: 'gpt-6', messages: [{ id: messageId, author: { role: 'assistant' } }] }) });
+    expect(h.posts.filter(row => row.type === 'cos-send-model')).toHaveLength(1);
+  });
+
+  it('joins a request id in input_message to the conversation the same response named', async () => {
+    const h = harness(), conversation_id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const request_id = '11111111-2222-4333-8444-555555555555';
+    await h.feedSse([
+      `data: ${JSON.stringify({ conversation_id, turn_topic_id: 'topic-1' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'input_message', input_message: { metadata: { request_id } } })}\n\n`
+    ], { method: 'POST' }, 'https://chatgpt.com/backend-api/f/conversation');
+    expect(h.posts.map(row => row.requestIds), 'the split join was never read').toEqual([[request_id]]);
+    expect(h.posts[0]!.conversationId).toBe(conversation_id);
+  });
+
+  /**
+   * One response is one conversation, and that is the whole of the authority claimed above.
+   * An event naming a different conversation abstains exactly as it always did — response order
+   * must never become authority across conversations.
+   */
+  it('abstains when a later event in the same response names a different conversation', async () => {
+    const h = harness(), conversation_id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const other = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+    await h.feedSse([
+      `data: ${JSON.stringify({ conversation_id, turn_topic_id: 'topic-1' })}\n\n`,
+      `data: ${JSON.stringify({ conversation_id: other, type: 'input_message',
+        input_message: { metadata: { request_id: '11111111-2222-4333-8444-555555555555' } } })}\n\n`
+    ], { method: 'POST' }, 'https://chatgpt.com/backend-api/f/conversation');
+    expect(h.posts, 'a contradictory response published an origin anyway').toHaveLength(0);
+  });
+
   it('requires a fresh document for a legacy observer without a disposal handle', () => {
     const h = harness(); h.markLegacy(); const before = h.currentFetch();
     h.evaluate(); expect(h.needsReload()).toBe(true); expect(h.currentFetch()).toBe(before);
@@ -448,3 +562,75 @@ describe('MAIN-world usage projection', () => {
     expect(h.posts).toEqual([]);
   });
 });
+
+describe('replacing the MAIN-world observer after an extension update', () => {
+  // 2026-09-26: open tabs kept running the old request-id reader after an update, because the
+  // same protocol version returned early. Only an explicit request from the service worker
+  // replaces it, and the retained origins reach the page before the old reader forgets them.
+  it('keeps the running observer on an ordinary re-execution', () => {
+    const h = harness(), first = h.observer();
+    h.evaluate();
+    expect(h.observer()).toBe(first);
+  });
+
+  it('replaces it when asked, handing over retained request origins first', async () => {
+    const h = harness();
+    h.ready();
+    await h.feedSse([`data: ${JSON.stringify({ conversation_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      message: { metadata: { request_id: 'wfr_handover_1' } } })}\n\n`]);
+    const first = h.observer();
+    h.posts.length = 0;
+    h.askReplace();
+    h.evaluate();
+    expect(h.observer()).not.toBe(first);
+    expect(h.posts).toContainEqual(expect.objectContaining({ type: 'cos-request-origin', requestIds: ['wfr_handover_1'] }));
+    // The flag is consumed: the next ordinary re-execution keeps the new observer.
+    const second = h.observer();
+    h.evaluate();
+    expect(h.observer()).toBe(second);
+  });
+});
+
+describe('Core app identity for mentions (#861)', () => {
+  const hint = (system_hint: string, name: string) => ({ system_hint, name, description: 'x', is_plugin: true });
+  const url = 'https://chatgpt.com/backend-api/system_hints?mode=composer';
+  const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setTimeout(resolve, 0)); };
+  it('reports the one Core app from the page\'s own system hints and repeats it on request', async () => {
+    const h = harness();
+    await h.feed({ system_hints: [hint('plugin:asdk_app_6aa5b6651c3c81919f03cb5dc38bf019', 'Chat On Steroids Core'),
+      hint('connector:asdk_app_6aa5b6651c3c81919f03cb5dc38bf019', 'Chat On Steroids Core'),
+      hint('plugin:asdk_app_6aa5b67a02148191b8053d85e5731dd3', 'Chat On Steroids Desktop'), hint('agent', 'Agent')] }, url);
+    await settle();
+    const expected = { type: 'cos-core-mention', path: 'app://asdk_app_6aa5b6651c3c81919f03cb5dc38bf019', name: 'Chat On Steroids Core' };
+    expect(h.posts.filter(row => row.type === 'cos-core-mention')).toEqual([expected]);
+    h.request();
+    expect(h.posts.filter(row => row.type === 'cos-core-mention')).toEqual([expected, expected]);
+  });
+  it('reports no mention for two different Core apps', async () => {
+    const h = harness();
+    await h.feed({ system_hints: [hint('plugin:asdk_app_aaaa1111', 'Chat On Steroids Core'), hint('plugin:asdk_app_bbbb2222', 'Chat On Steroids Core')] }, url);
+    await settle();
+    expect(h.posts.filter(row => row.type === 'cos-core-mention')).toEqual([{ type: 'cos-core-mention', path: null, name: null }]);
+  });
+  it('keeps the Core app when another hint list without it answers later', async () => {
+    // Measured live: the page asks for basic, custom_agents and plugins lists in parallel, and only
+    // the plugins list names Core. A later basic answer reset the mention, so the first prompt the
+    // app sent went out without it.
+    const h = harness();
+    await h.feed({ system_hints: [hint('plugin:asdk_app_6aa5b6651c3c81919f03cb5dc38bf019', 'Chat On Steroids Core')] }, 'https://chatgpt.com/backend-api/system_hints?exclude_logo=true&mode=plugins');
+    await settle();
+    await h.feed({ system_hints: [hint('agent', 'Agent'), hint('plugin:asdk_app_6aa5b67a02148191b8053d85e5731dd3', 'Chat On Steroids Desktop')] }, 'https://chatgpt.com/backend-api/system_hints?exclude_logo=true&mode=basic');
+    await settle();
+    const expected = { type: 'cos-core-mention', path: 'app://asdk_app_6aa5b6651c3c81919f03cb5dc38bf019', name: 'Chat On Steroids Core' };
+    expect(h.posts.filter(row => row.type === 'cos-core-mention')).toEqual([expected]);
+    h.request();
+    expect(h.posts.filter(row => row.type === 'cos-core-mention').at(-1)).toEqual(expected);
+  });
+  it('ignores a system hint list from another origin', async () => {
+    const h = harness();
+    await h.feed({ system_hints: [hint('plugin:asdk_app_aaaa1111', 'Chat On Steroids Core')] }, 'https://evil.example/backend-api/system_hints');
+    await settle();
+    expect(h.posts.filter(row => row.type === 'cos-core-mention')).toEqual([]);
+  });
+});
+

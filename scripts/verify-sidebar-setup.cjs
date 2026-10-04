@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
+const { fixtureConfigSource } = require('./fixtures/app-defaults.cjs');
 const output = path.join(root, 'outputs/sidebar-setup');
 app.setPath('userData', path.join(output, 'runtime'));
 app.whenReady().then(async () => {
@@ -18,7 +19,8 @@ app.whenReady().then(async () => {
   const fixture = `
     if (new URL(location.href).searchParams.has('reset')) localStorage.removeItem('chat-on-steroids.sidebar-order');
     localStorage.removeItem('cos.ui.language');
-    const config = {
+    ${fixtureConfigSource()}
+    const config = fixtureConfig({
       roots: [{name:'demo',path:'C:/demo'}], readOnly:true,
       capabilities: {browse:true,search:true,read:true,metadata:true,create:false,edit:false,move:false,deleteFile:false,command:false,screen:false,control:false,clipboardRead:false,clipboardWrite:false},
       tunnel: {kind:'openai',tunnelId:'',desktopTunnelId:'',binaryPath:''},
@@ -26,12 +28,12 @@ app.whenReady().then(async () => {
       sessions: {record:true,retainDays:30,advisoryTokens:300000,limitTokens:400000}, compaction:{auto:true,autoTokens:300000},
       multiAgent:{enabled:false,maxWorkers:2,allowUnattributedCalls:false,recoverAgentTabs:false},
       goal:{enabled:false,model:'fixture',reasoning:'default',prompt:'Fixture'}
-    };
+    });
     const state = {config,hasApiKey:false,hasGoalKey:false,resolvedBinary:null,bundledTunnelVersion:null,
       status:{state:'disconnected',detail:'',publicUrl:null,localUrl:null,handshakeAt:null,lastRequestAt:null,lastToolCallAt:null,health:null,surfaces:[]},
       bridge:{running:false,port:0,paired:false,present:false,lastSeenAt:null,extensionVersion:null},
       update:{current:'2.0.9',latest:null,stage:'idle',error:null,checkedAt:null}};
-    const project = {id:'demo-project',name:'VideoClipper',path:'C:/demo',createdAt:1};
+    const project = {id:'demo-project',name:'VideoClipper',path:'C:/demo',additionalPaths:['C:/shared'],createdAt:1};
     const projects = [project, {id:'second-project',name:'Documentation',path:'C:/docs',createdAt:2}];
     const rows = Array.from({length:22},(_,i)=>({id:'task-'+i,title:'Project chat '+(i+1),projectId:project.id,
       conversationId:'chat-'+i,chatIds:['chat-'+i],startedAt:1,updatedAt:100-i,endedAt:2,events:0,userMessages:0,
@@ -93,6 +95,14 @@ app.whenReady().then(async () => {
     win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...headingPoint});
     win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...headingPoint});
     await expectDisclosure(true);
+    const folders = await js(`(() => { const group=document.querySelector('.project-group'); const rows=[...group.querySelectorAll('.project-folder-row')];
+      return { paths:rows.map(row=>row.querySelector('.project-folder-path').textContent), roles:rows.map(row=>row.getAttribute('role')),
+        primaryRemove:!!rows[0].querySelector('.project-folder-remove'), removeCount:group.querySelectorAll('.project-folder-remove').length,
+        removeLabel:group.querySelector('.project-folder-remove')?.getAttribute('aria-label')??'',
+        addLabel:group.querySelector('.project-folder-add')?.getAttribute('aria-label')??'' }; })()`);
+    assert.deepEqual(folders.paths,['C:/demo','C:/shared']); assert.deepEqual(folders.roles,['listitem','listitem']);
+    assert.equal(folders.primaryRemove,false); assert.equal(folders.removeCount,1);
+    assert.match(folders.removeLabel,/C:\/shared/); assert.match(folders.addLabel,/VideoClipper/);
     await js(`document.querySelector('.project-heading').focus()`);
     for (const keyCode of ['Space','Enter']) {
       win.webContents.sendInputEvent({type:'keyDown',keyCode});
@@ -106,9 +116,9 @@ app.whenReady().then(async () => {
     const geometry = await js(`(() => { const group=document.querySelector('.project-group');
       const title=group.querySelector('.project-name').getBoundingClientRect(), chat=group.querySelector('.sess-top b').getBoundingClientRect();
       return {title:title.left,chat:chat.left,count:group.querySelectorAll(':scope > .sess').length,color:getComputedStyle(document.getElementById('newChat')).color,
-        icon:document.querySelector('#newChat use').getAttribute('href')}; })()`);
+        icon:[...document.querySelector('#newChat i.ico').classList].find(name => name.startsWith('ph-') && name !== 'ph')}; })()`);
     assert.equal(geometry.count,5); assert.ok(Math.abs(geometry.title-geometry.chat)<1,JSON.stringify(geometry));
-    assert.equal(geometry.color,'rgb(255, 255, 255)'); assert.equal(geometry.icon,'#i-pencil');
+    assert.equal(geometry.color,'rgb(255, 255, 255)'); assert.equal(geometry.icon,'ph-pencil-simple');
     await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
     await new Promise(r=>setTimeout(r,200));
     const points=await js(`[...document.querySelectorAll('.project-group > .sess')].map(row=>{const r=row.getBoundingClientRect();return {x:Math.round(r.left+35),y:Math.round(r.top+r.height/2)}})`);
@@ -170,7 +180,8 @@ app.whenReady().then(async () => {
       });
       return {width:menu.width, right:menu.right, triggerWidth:trigger.width, triggerRight:trigger.right, rows};
     })()`);
-    assert.ok(compactProfiles.width >= compactProfiles.triggerWidth && compactProfiles.width <= 190, JSON.stringify(compactProfiles));
+    // settings.css sizes the menu at min(260px, 100vw - 32px) since the 2026-09-28 Settings polish.
+    assert.ok(compactProfiles.width >= compactProfiles.triggerWidth && compactProfiles.width <= 260, JSON.stringify(compactProfiles));
     assert.ok(Math.abs(compactProfiles.right - compactProfiles.triggerRight) <= 1, JSON.stringify(compactProfiles));
     for (const row of compactProfiles.rows) {
       assert.ok(compactProfiles.right - row.removeRight <= 12, JSON.stringify(compactProfiles));

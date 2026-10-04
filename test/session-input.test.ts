@@ -38,7 +38,11 @@ vi.mock('../src/main/session/store.js', () => ({
     selectedModel: { conversationId: id === 'session-two' ? 'conversation-b' : binding.conversationId, model: binding.model } })),
   findSessionByConversation: vi.fn(async (id: string) => [...openings.values()].find(row => row.conversationId === id) ?? (binding.recorded && id === binding.conversationId ? { id: 'session-one', conversationId: id } : null))
 }));
-vi.mock('../src/main/config.js', () => ({ getConfig: () => ({ ui: { finishTool: binding.finishEnabled, finishAction: 'goal', finishLeadMinutes: binding.leadMinutes }, goal: { enabled: binding.goalEnabled, mode: 'goal', impulseMinutes: binding.impulseMinutes } }) }));
+vi.mock('../src/main/config.js', () => ({ getConfig: () => ({
+  ui: { finishTool: binding.finishEnabled, finishAction: 'goal', finishLeadMinutes: binding.leadMinutes },
+  goal: { enabled: binding.goalEnabled, mode: 'goal', impulseMinutes: binding.impulseMinutes },
+  multiAgent: { strictChatAllowlist: false }
+}) }));
 vi.mock('../src/main/session/blocked-chats.js', () => ({ isChatBlocked: () => binding.blocked }));
 let directory: string;
 let now: number;
@@ -979,6 +983,24 @@ describe('browser decision lifetime', () => {
     await expect(requestBrowserDecision('Retry', new AbortController().signal, { sourceSessionId: sessionId })).rejects.toThrow('goal_browser_send_unconfirmed');
     expect(await listInputs()).toHaveLength(1);
   });
+  it('lets a source retry after a confirmed temporary helper send timed out', async () => {
+    // 2026-10-02, live: a Temporary Chat helper confirmed its prompt, its answer was never taken,
+    // and the draft timed out. The retry was then refused as "could not confirm whether ChatGPT
+    // received the helper prompt" although it had been confirmed, and Goal stopped for good.
+    // Only a cancellation before any receipt is ambiguous enough to block a second helper.
+    const controller = new AbortController();
+    const answer = requestBrowserDecision('Choose', controller.signal, { sourceSessionId: sessionId, lifetime: 'temporary-planner' });
+    const rejected = expect(answer).rejects.toThrow('goal_browser_cancelled');
+    const row = (await listInputs())[0]!;
+    expect(await claimBrowserInput(row.id, 'document', null)).not.toBeNull();
+    expect(await acknowledgeBrowserInput(row.id, 'document', null, 'helper-user-message')).toBe(true);
+    controller.abort();
+    await rejected;
+    const retry = requestBrowserDecision('Retry', new AbortController().signal, { sourceSessionId: sessionId, lifetime: 'temporary-planner' });
+    void retry.catch(() => undefined);
+    await vi.waitFor(async () => expect((await listInputs()).filter(entry => entry.state === 'queued')).toHaveLength(1));
+  });
+
   it('accepts only its exact claimant answer, with idempotent send ACK', async () => {
     const controller = new AbortController();
     const answer = requestBrowserDecision('Choose one', controller.signal);

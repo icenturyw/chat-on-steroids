@@ -55,12 +55,14 @@ const fixture = vi.hoisted(() => {
     child.emit('close', 0);
   });
 
-  return { children, spawn, health, termination, terminate };
+  const resolveProxy = vi.fn(async (_url: string) => 'DIRECT');
+  return { children, spawn, health, termination, terminate, resolveProxy };
 });
 
+vi.mock('electron', () => ({ session: { defaultSession: { resolveProxy: fixture.resolveProxy } } }));
 vi.mock('node:child_process', () => ({ spawn: fixture.spawn }));
 vi.mock('../src/main/exec.js', () => ({
-  childEnv: () => ({}),
+  childEnv: (overrides?: Record<string, string>) => ({ ...overrides }),
   terminateProcessTree: fixture.terminate
 }));
 vi.mock('../src/main/tunnel/locate.js', () => ({ locateBinary: () => 'tunnel-client-test' }));
@@ -96,6 +98,7 @@ beforeEach(() => {
   fixture.children.length = 0;
   fixture.spawn.mockClear();
   fixture.terminate.mockClear();
+  fixture.resolveProxy.mockReset().mockResolvedValue('DIRECT');
   fixture.health.url = null;
   fixture.termination.held = false;
   fixture.termination.release = null;
@@ -104,6 +107,36 @@ beforeEach(() => {
 });
 
 describe('OpenAI tunnel process ownership', () => {
+  it('passes the elected system proxy only in the child environment', async () => {
+    vi.useFakeTimers();
+    fixture.resolveProxy.mockResolvedValue('PROXY 127.0.0.1:10808');
+    const handle = await startTunnel({ localUrl: 'http://127.0.0.1:1234/secret', settings, apiKey: 'test', report: () => {} });
+    try {
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fixture.spawn).toHaveBeenCalledWith('tunnel-client-test', expect.any(Array), expect.objectContaining({
+        env: expect.objectContaining({ HTTPS_PROXY: 'http://127.0.0.1:10808/', MCP_SERVER_URL: 'url=http://127.0.0.1:1234/secret,channel=main' })
+      }));
+      const argv = (fixture.spawn.mock.calls as unknown[][])[0]?.[1];
+      expect(JSON.stringify(argv)).not.toContain('10808');
+      expect(JSON.stringify(argv)).not.toContain('/secret');
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('cannot launch after Stop retires a pending system proxy lookup', async () => {
+    vi.useFakeTimers();
+    let resolve!: (route: string) => void;
+    fixture.resolveProxy.mockImplementation(() => new Promise<string>(done => { resolve = done; }));
+    const handle = await startTunnel({ localUrl: 'http://127.0.0.1:1234/secret', settings, apiKey: 'test', report: () => {} });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fixture.resolveProxy).toHaveBeenCalledOnce();
+    await handle.stop();
+    resolve('PROXY 127.0.0.1:10808');
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fixture.spawn).not.toHaveBeenCalled();
+  });
+
   it.each([
     { level: 'WARN', msg: 'poll failed; backing off', error: 'dial tcp: i/o timeout', retry_in_ms: 401 },
     { level: 'WARN', msg: 'poll failed; backing off', error: 'unexpected EOF', retry_in_ms: 403 },

@@ -3538,10 +3538,16 @@ clears on disconnect/stop/reset. Request discovery, receipt, exact ownership and
 activity remain distinct evidence. Optional embedded-host presentation does not enable or
 implement an embedded browser.
 
-`tunnel/*` owns pinned-client discovery, child lifetime, health metrics and confirmed outages;
-development discovery uses Electron's app root for `resources/tunnel`, independent of source
+`tunnel/*` owns pinned-client discovery, child lifetime, health metrics and confirmed outages.
+Development discovery uses Electron's app root for `resources/tunnel`, independent of source
 nesting, bundle layout and the launching shell's working directory. Restore missing binaries
 with `npm run tunnel`, which verifies the pinned archive checksum before staging it.
+OpenAI tunnel children retain explicit client proxy settings and the control-plane protocol's
+proxy environment variable first. Otherwise each launch resolves that URL through Electron's
+system/PAC proxy owner and supplies its elected first route, when supported, as a child-only
+HTTP(S) proxy variable. `NO_PROXY` and direct loopback MCP routing remain client-owned. Proxy
+values stay in the environment, never argv; lookup failures log no returned proxy text. A
+delayed lookup cannot launch a child after its tunnel attempt is stopped.
 `diagnostics.ts` tests the chain hop by hop. Transient health evidence must not produce repeated
 replacement tunnels or claim a broken provider was repaired. Update checks (§20), browser wake
 and MCP connection have separate lifecycles.

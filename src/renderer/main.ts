@@ -1692,7 +1692,7 @@ function paintClock(): void {
   const handshake = $('bigHandshake');
   handshake.textContent = shortAgo(proofAt);
   handshake.className = connected ? '' : status.state === 'offline' ? 'is-bad' : 'is-cold';
-  $('bigHandshakeLabel').textContent = t(openAiTunnel ? 'verified link' : 'verified ChatGPT link');
+  ui($('bigHandshakeLabel'), 'textContent', () => t(openAiTunnel ? 'verified link' : 'verified ChatGPT link'));
 
   const request = $('bigRequest');
   request.textContent = shortAgo(status.lastRequestAt);

@@ -22,6 +22,7 @@ import { childEnv, terminateProcessTree } from '../exec.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 import { ago, POLL_FRESH_MS, readClientStatus, readPollHealth } from './health.js';
 import { locateBinary } from './locate.js';
+import { applySystemProxy } from './proxy.js';
 
 export interface TunnelReport {
   state: ConnectionState;
@@ -524,14 +525,18 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     const discoveryHeaders = Object.entries(opts.discoveryHeaders ?? {})
       .map(([name, value]) => `${name}: ${value}`)
       .join(', ');
+    const env = childEnv({
+      CONTROL_PLANE_API_KEY: opts.apiKey ?? '',
+      MCP_SERVER_URL: `url=${opts.localUrl},channel=main`,
+      ...(discoveryHeaders ? { MCP_DISCOVERY_EXTRA_HEADERS: discoveryHeaders } : {})
+    });
+    await applySystemProxy(env);
+    // Disconnect may have retired this attempt while Chromium resolved a system/PAC proxy.
+    if (stopped || current) return;
     const proc = spawn(binary, args, {
       // Keep both credentials and the secret local MCP path out of argv/process listings.
       // tunnel-client officially supports these environment-backed configuration fields.
-      env: childEnv({
-        CONTROL_PLANE_API_KEY: opts.apiKey ?? '',
-        MCP_SERVER_URL: `url=${opts.localUrl},channel=main`,
-        ...(discoveryHeaders ? { MCP_DISCOVERY_EXTRA_HEADERS: discoveryHeaders } : {})
-      }),
+      env,
       windowsHide: true,
       // Own a POSIX process group so stopTree terminates any helpers the client starts.
       // Windows uses taskkill /T and keeps its existing launch semantics.

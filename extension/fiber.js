@@ -1852,7 +1852,7 @@
         const conversation = shell ? shellConversation(queries, shell.entry.conversationId, conversationEvidenceOf(fiber)) : conversationEvidenceOf(fiber);
         const metadata = shell ? shellRequestMetadata(fiber, queries, shell, conversation) : messages;
         const requests = requestIdsOf(metadata);
-        const sessions = openAiSessionsOf(messages);
+        const sessions = openAiSessionsOf(metadata);
         if (shell) for (const call of calls) {
           const invocation = metadata.find(message => message.id === call.messageId);
           const source = invocation?.metadata.request_id ? invocation :

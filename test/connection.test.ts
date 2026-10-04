@@ -54,6 +54,8 @@ const mocks = vi.hoisted(() => {
     tunnelStop: vi.fn(async (): Promise<void> => undefined),
     tunnelOptions: null as null | Record<string, any>,
     secretGate: null as Promise<void> | null,
+    secretGateKey: null as string | null,
+    secretGateReached: vi.fn(),
     secretReached: vi.fn(),
     secrets: {} as Record<string, string | null>
   };
@@ -105,7 +107,10 @@ vi.mock('../src/main/secrets.js', () => ({
       return mocks.secrets[key] ?? null;
     }
     mocks.secretReached();
-    if (mocks.secretGate) await mocks.secretGate;
+    if (mocks.secretGate && (!mocks.secretGateKey || mocks.secretGateKey === key)) {
+      mocks.secretGateReached();
+      await mocks.secretGate;
+    }
     return mocks.secrets[key] ?? null;
   }),
   setSecret: vi.fn(async (key: string, value: string) => {
@@ -152,8 +157,10 @@ describe('connection surface state', () => {
     mocks.optionalStartGate = null;
     mocks.optionalStartReached.mockClear();
     mocks.tunnelStop.mockClear();
+    mocks.secretGateReached.mockClear();
     mocks.secretReached.mockClear();
     mocks.secretGate = null;
+    mocks.secretGateKey = null;
     Object.assign(mocks.caps, {
       browse: true,
       search: true,
@@ -470,10 +477,12 @@ describe('connection surface state', () => {
 
   it('finishes final shutdown without waiting for a parked credential lookup', async () => {
     let releaseSecret!: () => void;
+    mocks.config.tunnel.kind = 'openai';
+    mocks.secretGateKey = 'openaiApiKey';
     mocks.secretGate = new Promise<void>(resolve => { releaseSecret = resolve; });
     const connection = await import('../src/main/connection.js');
     const connecting = connection.connect();
-    await vi.waitFor(() => expect(mocks.secretReached).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mocks.secretGateReached).toHaveBeenCalledTimes(1));
     const shutdown = connection.shutdownConnection();
     let finished = false;
     void shutdown.then(() => { finished = true; });
@@ -581,13 +590,14 @@ describe('connection surface state', () => {
   it('tears down the local endpoint when Keychain lookup resumes after final shutdown', async () => {
     mocks.config.tunnel.kind = 'openai';
     let releaseSecret!: () => void;
+    mocks.secretGateKey = 'openaiApiKey';
     mocks.secretGate = new Promise<void>((resolve) => {
       releaseSecret = resolve;
     });
     const connection = await import('../src/main/connection.js');
 
     const connecting = connection.connect();
-    await vi.waitFor(() => expect(mocks.secretReached).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mocks.secretGateReached).toHaveBeenCalledTimes(1));
     const shuttingDown = connection.shutdownConnection();
     releaseSecret();
     await Promise.all([connecting, shuttingDown]);

@@ -407,7 +407,7 @@ it('joins dump-shaped paired tool sources through the real recorder into worker 
     await publish(prime, primeRequest);
     const parent = await findSessionByConversation(prime, { requireUnique: true });
     expect((await getSession(child!.id))?.origin?.fromSessionId).toBe(parent!.id);
-    const delivered = await dispatch('agents', { action: 'status' }, null, primeRequest, 'core', async () => {
+    const delivered = await dispatch('agents', { action: 'status' }, null, null, primeRequest, 'core', async () => {
       expect(broker.statusForCaller(currentCaller()).self?.id).toBe('prime');
       return ok('Exact prime status');
     });

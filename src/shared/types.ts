@@ -148,6 +148,8 @@ export interface UiPrefs {
   browserBridgePort?: import('./browser-bridge.js').BrowserBridgePort;
   /** Opt-in browser automation for changed connector tool schemas. */
   autoRefreshPlugins?: boolean;
+  /** Opt-in deterministic metadata routing for managed Skills on ordinary user input. */
+  autoSelectSkills?: boolean;
   /** Actual app-owned tabs to retain; active work and drafts stay protected. Omitted uses workers + 2. */
   tabsToKeepOpen?: number;
   finishTool?: boolean;
@@ -372,6 +374,12 @@ export interface ControlApiSettings {
 }
 
 export interface Config {
+  /**
+   * Names this computer's connectors in ChatGPT, for one ChatGPT account used on several
+   * computers: "Windows" makes them "Chat On Steroids Core (Windows)" and so on. Empty keeps the
+   * plain names. It belongs to the install, not to a setup profile.
+   */
+  connectorSuffix?: string;
   /** Inactive setups only. Keys remain in encrypted secret slots addressed by profile ID. */
   setupProfiles?: Array<{ id: string; name: string; tunnelId: string; desktopTunnelId: string; pluginsTunnelId: string }>;
   roots: Root[];

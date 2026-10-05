@@ -1,4 +1,5 @@
 import { currentLanguage, ui, uiText, t, initLanguage, onLanguageChange } from './i18n.js';
+import { CONNECTOR_SUFFIX_MAX, CONNECTOR_SUFFIX_PATTERN } from '../shared/connector-names.js';
 import { displayLocalServer } from './local-url.js';
 import { paintPluginRefreshReminder } from './plugin-refresh-reminder.js';
 import { initUsage, refreshUsage } from './usage.js';
@@ -582,6 +583,7 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?:
   const chatPatch = chatSettingsPatch(previous);
   const selectedBridgePort = $<HTMLSelectElement>('browserBridgePort').value;
   const patch: SettingsPatch = {
+    connectorSuffix: connectorSuffixDraft(previous),
     capabilities,
     readOnly,
     commandAllowlist,
@@ -610,6 +612,7 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?:
       autoContinue: $<HTMLInputElement>('autoContinue').checked,
       browserOnly: $<HTMLInputElement>('browserOnly').checked,
       autoRefreshPlugins: $<HTMLInputElement>('autoRefreshPlugins').checked,
+      autoSelectSkills: $<HTMLInputElement>('autoSelectSkills').checked,
       autoConnect: $<HTMLInputElement>('autoConnect').checked,
       startAtLogin: $<HTMLInputElement>('startAtLogin').checked,
       minimizeToTray: $<HTMLInputElement>('minimizeToTray').checked,
@@ -646,6 +649,7 @@ async function saveSnapshot(patch: SettingsPatch, previous: AppState['config']):
       return before !== after;
     });
   const base: SettingsPatch = {
+    connectorSuffix: previous.connectorSuffix ?? '',
     capabilities: previous.capabilities,
     readOnly: previous.readOnly,
     commandAllowlist: previous.commandAllowlist,
@@ -737,15 +741,6 @@ function isRunning(value: AppState['status']['state']): boolean {
   );
 }
 
-function isConnecting(value: AppState['status']['state']): boolean {
-  return value === 'starting-server' || value === 'connecting-tunnel';
-}
-
-/** The title bar can only start a connection; running and teardown states belong to the sidebar. */
-function canHeaderConnect(value: AppState['status']['state']): boolean {
-  return value === 'disconnected' || value === 'auth-failed' || value === 'tunnel-unavailable';
-}
-
 interface SetupConnectionValues { tunnelId: string; hasApiKey: boolean }
 
 /** What still has to happen before connecting can work, in the order of the wizard. */
@@ -799,6 +794,22 @@ function currentSetupMissingStep(next: AppState): { step: string; text: string }
     tunnelId: $<HTMLInputElement>('tunnelId').value.trim(),
     hasApiKey: next.hasApiKey || (next.secureStorage?.available !== false && key.value !== '')
   });
+}
+
+/**
+ * This computer's connector name suffix as typed, checked here so one invalid character cannot
+ * reject the whole settings save it rides in. Invalid keeps the saved value and says why.
+ */
+function connectorSuffixValid(): string | null {
+  const input = $<HTMLInputElement>('connectorSuffix');
+  const value = input.value.trim().replace(/\s+/g, ' ');
+  const valid = value.length <= CONNECTOR_SUFFIX_MAX && CONNECTOR_SUFFIX_PATTERN.test(value);
+  input.setAttribute('aria-invalid', String(!valid));
+  $('connectorSuffixError').hidden = valid;
+  return valid ? value : null;
+}
+function connectorSuffixDraft(previous: Config): string {
+  return connectorSuffixValid() ?? previous.connectorSuffix ?? '';
 }
 
 interface RootRenameState {
@@ -1152,27 +1163,15 @@ function paintSetupFields(): void {
   if (state) paintConnectButtons(state);
 }
 
-/** Setup Connect buttons require readiness; the title-bar action stays available to reach Setup. */
+/** Connect is enabled from the persisted state or from valid drafts still in the fields. */
 function paintConnectButtons(next: AppState): void {
   const running = isRunning(next.status.state), disconnecting = next.status.state === 'disconnecting';
-  const connecting = isConnecting(next.status.state);
   const missing = currentSetupMissingStep(next);
-  const header = $<HTMLButtonElement>('headerConnect');
-  header.hidden = !(connecting || canHeaderConnect(next.status.state));
-  header.disabled = connecting;
-  header.title = canHeaderConnect(next.status.state) && missing ? missing.text : '';
   for (const id of ['connectionPopoverToggle', 'wizConnect']) {
     const button = $<HTMLButtonElement>(id);
     button.disabled = disconnecting || (!running && missing !== null);
     button.title = !running && missing ? missing.text : '';
   }
-}
-
-/** The title-bar shortcut is only another ingress to the persisted Appearance theme owner. */
-function paintThemeButton(theme: 'light' | 'dark'): void {
-  const dark = theme === 'dark';
-  ui($('themeBtn'), 'aria-label', () => t(dark ? 'Switch to light mode' : 'Switch to dark mode'));
-  ui($('themeBtn'), 'title', () => t(dark ? 'Switch to light mode' : 'Switch to dark mode'));
 }
 
 function apply(next: AppState): void {
@@ -1187,8 +1186,7 @@ function apply(next: AppState): void {
   const connected = status.state === 'connected';
   const offline = status.state === 'offline';
   const disconnecting = status.state === 'disconnecting';
-  const connecting = isConnecting(status.state);
-  const busy = disconnecting || connecting;
+  const busy = disconnecting || status.state === 'starting-server' || status.state === 'connecting-tunnel';
   const failed = status.state === 'auth-failed' || status.state === 'tunnel-unavailable';
   const running = isRunning(status.state);
   const missing = currentSetupMissingStep(next);
@@ -1196,14 +1194,13 @@ function apply(next: AppState): void {
   // ---- theme
   const appearanceUi = requestedSettings?.ui ?? config.ui;
   appearance.apply(appearanceUi);
-  paintThemeButton(appearanceUi.theme);
 
   const headerConnect = $<HTMLButtonElement>('headerConnect');
-  headerConnect.hidden = !(connecting || canHeaderConnect(status.state));
-  headerConnect.disabled = connecting;
-  headerConnect.title = canHeaderConnect(status.state) && missing ? missing.text : '';
-  ui(headerConnect, 'textContent', () => connecting ? t('Connecting…') : t('Connect'));
-  if (connected && previousState && previousState.status.state !== 'connected' && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) $('sidebarConnection').animate([
+  const wasVisible = !headerConnect.hidden;
+  headerConnect.hidden = connected;
+  headerConnect.disabled = busy;
+  ui(headerConnect, 'textContent', () => disconnecting ? t('Disconnecting…') : busy ? t('Connecting…') : t('Connect'));
+  if (connected && wasVisible && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) $('sidebarConnection').animate([
     { boxShadow: '0 0 0 0 var(--green)' }, { boxShadow: '0 0 0 12px transparent' }
   ], { duration: 850, iterations: 2 });
 
@@ -1286,6 +1283,9 @@ function apply(next: AppState): void {
   );
   ui($('methodHint'), 'textContent', () => t(methodHint(config)));
   applyValue($<HTMLInputElement>('tunnelId'), config.tunnel.tunnelId, previousState?.config.tunnel.tunnelId);
+  applyValue($<HTMLInputElement>('connectorSuffix'), config.connectorSuffix ?? '', previousState?.config.connectorSuffix ?? '');
+  // A computer that has a name shows it, so the cards' suffixed names never come unexplained.
+  if (config.connectorSuffix && !previousState?.config.connectorSuffix) $<HTMLDetailsElement>('connectorSuffixField').open = true;
   applyValue(
     $<HTMLInputElement>('desktopTunnelId'),
     config.tunnel.desktopTunnelId,
@@ -1322,6 +1322,7 @@ function apply(next: AppState): void {
   applyChecked($<HTMLInputElement>('autoContinue'), config.ui.autoContinue !== false, previousState?.config.ui.autoContinue);
   applyChecked($<HTMLInputElement>('browserOnly'), config.ui.browserOnly === true, previousState?.config.ui.browserOnly);
   applyChecked($<HTMLInputElement>('autoRefreshPlugins'), config.ui.autoRefreshPlugins === true, previousState?.config.ui.autoRefreshPlugins);
+  applyChecked($<HTMLInputElement>('autoSelectSkills'), config.ui.autoSelectSkills === true, previousState?.config.ui.autoSelectSkills);
   $('startAtLoginRow').hidden = next.loginStartupAvailable !== true;
   $<HTMLInputElement>('startAtLogin').disabled = next.loginStartupAvailable !== true;
   applyChecked($<HTMLInputElement>('startAtLogin'), config.ui.startAtLogin === true, previousState?.config.ui.startAtLogin);
@@ -1920,22 +1921,14 @@ async function dropFolders(event: DragEvent): Promise<void> {
   }
 }
 
-async function toggleConnection(allowDisconnect = true): Promise<void> {
+async function toggleConnection(): Promise<void> {
   if (!state || state.status.state === 'disconnecting') return;
-  if (!allowDisconnect && !canHeaderConnect(state.status.state)) return;
   if (!isRunning(state.status.state) && !(await persistSetupDraftsForConnection())) {
     const missing = state ? missingStep(state) : null;
-    if (missing) {
-      showTab('setup');
-      const target = step(missing.step);
-      target.tabIndex = -1;
-      target.focus();
-      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }
+    if (missing) { showTab('setup'); step(missing.step).scrollIntoView({ block: 'center', behavior: 'smooth' }); }
     return;
   }
   if (!state) return;
-  if (!allowDisconnect && !canHeaderConnect(state.status.state)) return;
   // Mirrors the button label exactly, so a click always does what it says.
   const next = await run(isRunning(state.status.state) ? api.disconnect() : api.connect());
   if (next) apply(next);
@@ -2051,17 +2044,14 @@ function installUpdate(): void {
 
 $('updateInstall').addEventListener('click', installUpdate);
 $('installUpdate').addEventListener('click', installUpdate);
-$('themeBtn').addEventListener('click', () => {
+$('headerConnect').addEventListener('click', async () => {
   if (!state) return;
-  // Derive from the latest requested value so two quick presses remain two distinct choices
-  // while the first settings save is still in flight.
-  const currentUi = requestedSettings?.ui ?? state.config.ui;
-  const next = currentUi.theme === 'dark' ? 'light' : 'dark';
-  appearance.apply({ ...currentUi, theme: next });
-  paintThemeButton(next);
-  void save({ theme: next });
+  if (missingStep(state)) { showTab('setup'); return; }
+  if (isRunning(state.status.state)) {
+    const disconnected = await run(api.disconnect()); if (!disconnected) return; apply(disconnected);
+  }
+  const connected = await run(api.connect()); if (connected) apply(connected);
 });
-$('headerConnect').addEventListener('click', () => void toggleConnection(false));
 $('connectionPopoverToggle').addEventListener('click', () => void toggleConnection());
 $('wizConnect').addEventListener('click', () => void toggleConnection());
 
@@ -2079,6 +2069,18 @@ for (const id of ['copyLog', 'copyLogText']) {
     if (copied) toast(t('Activity copied'));
   });
 }
+
+// One file for a bug report; the main process removes personal details and shows the saved file.
+$('saveDiagnosticsReport').addEventListener('click', async () => {
+  const button = $<HTMLButtonElement>('saveDiagnosticsReport');
+  button.disabled = true;
+  try {
+    const result = await run(api.saveDiagnosticsReport());
+    if (result?.saved) toast(t('Diagnostics report saved as {0}. Read it before you share it.', [result.name]));
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $('copyLogJson').addEventListener('click', async () => {
   const text = await run(api.getLogJson());
@@ -2171,10 +2173,12 @@ for (const id of [
   'desktopTunnelId',
   'cloudflareMode',
   'cloudflarePublicUrl',
-  'cloudflareLocalPort'
+  'cloudflareLocalPort',
+  'connectorSuffix'
 ]) {
   $(id).addEventListener('change', () => void save());
 }
+$('connectorSuffix').addEventListener('input', () => { connectorSuffixValid(); });
 
 document.addEventListener('click', (event) => {
   const target = event.target as HTMLElement;
@@ -2198,7 +2202,10 @@ $('updateExtension').addEventListener('click', () => {
 });
 
 api.onStateChanged(apply);
-api.onLogEntry(addLogLine);
+// Lines logged while the startup snapshot loads arrive live and are in the snapshot too. Hold
+// them until it lands, so each shows once and after the lines that came before it.
+let heldLogLines: LogEntry[] | null = [];
+api.onLogEntry(entry => { if (heldLogLines) heldLogLines.push(entry); else addLogLine(entry); });
 api.onSwarmChanged(paintAgentFilter);
 
 async function refresh(): Promise<void> {
@@ -2220,7 +2227,15 @@ void (async () => {
   // A first run has nothing set up, so open on the wizard rather than an empty Home.
   showTab(state && missingStep(state)?.step === 'folder' ? 'setup' : 'chat');
   const entries = await run(api.getLog());
-  for (const entry of entries ?? []) addLogLine(entry);
+  const key = (entry: LogEntry): string => `${entry.time}\0${entry.level}\0${entry.agent ?? ''}\0${entry.message}`;
+  const shown = new Map<string, number>();
+  for (const entry of entries ?? []) { addLogLine(entry); shown.set(key(entry), (shown.get(key(entry)) ?? 0) + 1); }
+  const held = heldLogLines ?? [];
+  heldLogLines = null;
+  for (const entry of held) {
+    const left = shown.get(key(entry)) ?? 0;
+    if (left > 0) shown.set(key(entry), left - 1); else addLogLine(entry);
+  }
   const swarm = await run(api.getSwarm());
   if (swarm) paintAgentFilter(swarm);
 })();

@@ -819,6 +819,18 @@ describe('saying what to do next', () => {
       .toMatch(/PowerShell parsed none of the command/i);
   });
 
+  it('recognises localized batch parser diagnostics that quote Create typographically', () => {
+    const output = [
+      '使用“1”个参数调用“Create”时发生异常:“所在位置 行:1 字符: 14',
+      "+ Write-Output 'unterminated",
+      '+              ~~~~~~~~~~~~~',
+      "字符串缺少终止符: '。"
+    ].join('\n');
+
+    expect(execRecoveryHints("Write-Output 'unterminated", output).join(' '))
+      .toMatch(/PowerShell parsed none of the command/i);
+  });
+
   it('stays silent on a shell where the operators work', () => {
     // PowerShell 7 runs `&&` without complaint, so there is no refusal text and no hint. The
     // hint keys off the shell's own error, never off the command containing the operator.

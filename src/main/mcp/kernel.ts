@@ -123,12 +123,11 @@ import {
   conversationAttachment,
   findSessionByConversation,
   getSession,
-  readOverflowText,
   requestBelongsToActiveTurn,
   requestTurnOwnershipCutoff
 } from '../session/store.js';
 import { sessionFinishDeadline } from '../session/finish.js';
-import type { StoredText, ToolOutcome } from '../../shared/session.js';
+import type { ToolOutcome } from '../../shared/session.js';
 
 /** The page's exact proof of a request id, by which a running call counts for its chat. */
 const requestOwner = (requestId: string): string | null => requestCorrelation(requestId)?.conversationId ?? null;
@@ -139,6 +138,17 @@ const UNTRUSTED_WORKER_NOTICE =
   'A tool call from a worker whose owning prime is not currently allowed was refused. In the chat list, hover the owning prime row in the sidebar and choose Trust (✓) if it is untrusted, or Release there if it is blocked.';
 const UNPROVEN_WORKER_NOTICE =
   'A tool call from an app-created worker was refused because no unique owning prime is currently proven. Return to the owning prime in the chat list; once its row is known, hover it in the sidebar and choose Trust (✓), or Release there if it is blocked, then retry after the worker is attached or recovered there.';
+const WORKER_CONNECTION_PROFILE_REFUSAL =
+  'WORKER_CONNECTION_PROFILE_MISMATCH: this worker belongs to a different Chat On Steroids Setup profile. ' +
+  'No local tool was run. Return to the owning prime and switch back to the connection that created this worker family; ' +
+  'cross-profile worker routing is not automatic.';
+
+function workerConnectionProfileRefusal(caller: CallCaller): string | null {
+  const owner = caller.conversationId ? workerPrimeOwner(caller.conversationId) : null;
+  return owner?.owned && owner.setupProfileId && caller.setupProfileId &&
+    owner.setupProfileId !== caller.setupProfileId ? WORKER_CONNECTION_PROFILE_REFUSAL : null;
+}
+
 const untrustedNoticeEpisodes = new Map<string, true>();
 const UNTRUSTED_NOTICE_MAX = 128;
 
@@ -196,6 +206,8 @@ async function recordUntrustedRefusalNotice(context: CallContext): Promise<void>
 
 export interface ToolContext {
   exposedFinishTool?: boolean;
+  /** Stable Setup-profile provenance captured by the MCP endpoint generation. */
+  setupProfileId?: string;
   roots: Root[];
   /** Capabilities currently allowed by the live settings. */
   caps: Capabilities;
@@ -618,10 +630,14 @@ function withInbox(
   const messages = scoped?.messages ?? [];
   if (messages.length === 0) return result;
   const lines = messages
-    .map(
-      (message) =>
-        `• ${message.from}${message.runId ? ` [run_id=${message.runId}]` : ''}${message.offers > 1 ? ' (delivery retry)' : ''}: ${message.text}`
-    )
+    .map((message) => {
+      const route = message.fromRunId
+        ? ` [source_run_id=${message.fromRunId}]${message.runId ? ` [received_on_run_id=${message.runId}]` : ''}`
+        : message.runId
+          ? ` [run_id=${message.runId}]`
+          : '';
+      return `• ${message.from}${route}${message.offers > 1 ? ' (delivery retry)' : ''}: ${message.text}`;
+    })
     .join('\n');
   return {
     ...result,
@@ -651,7 +667,8 @@ export async function dispatch(
   requestId: string | null,
   surface: SurfaceId,
   run: () => Promise<ToolResult>,
-  parent?: CallContext
+  parent?: CallContext,
+  setupProfileId: string | null = null
 ): Promise<ToolResult> {
   // The context is built here, one layer out from where the work happens, because the
   // compaction barrier asks about the whole request and not just the handler. A call is
@@ -666,7 +683,9 @@ export async function dispatch(
     transportKey,
     agent: null,
     allowUnattributed: getConfig().multiAgent.allowUnattributedCalls,
-    caller: parent ? { ...parent.caller } : { transportKey, requestId, conversationId: null, sessionId: null },
+    caller: parent
+      ? { ...parent.caller }
+      : { transportKey, requestId, conversationId: null, sessionId: null, setupProfileId },
     outcome: null,
     evidence: emptyEvidence()
   };
@@ -819,9 +838,12 @@ async function dispatchTracked(
   // Preserve the pre-strict fast path exactly: when strict mode is off, Block is a synchronous
   // exact-chat lookup and ordinary calls do not acquire extra microtask yields. Interactive PTYs
   // are timing-sensitive enough that needless awaits can change which terminal frame a poll sees.
-  const conversationPolicyRefusal = strictChatAllowlistEnabled()
+  // Connection provenance is an admission fence, not just a handler error: a refused call
+  // must not revive its worker or consume/receive input owned by the other connection.
+  const conversationPolicyRefusal = (strictChatAllowlistEnabled()
     ? await conversationAccessRefusal(context.caller.conversationId)
-    : isChatBlocked(context.caller.conversationId) ? BLOCKED_CHAT_REFUSAL : null;
+    : isChatBlocked(context.caller.conversationId) ? BLOCKED_CHAT_REFUSAL : null) ??
+    workerConnectionProfileRefusal(context.caller);
   let silentFinishAuthorized = false;
   // Two things about liveness, both before the agent is resolved so that the answer this
   // call gets is the state this call itself established.
@@ -964,7 +986,7 @@ async function dispatchTracked(
   // Refuse and let the model retry once page evidence is healthy instead.
   // The arrival of this exact call acknowledges earlier injected input before the
   // handler reads the queue. New queued input is still offered only with its result.
-  if (!nested) await acknowledgeToolInput(context.caller.sessionId, context.caller.conversationId, requestId, startedAt)
+  if (!nested && !workerConnectionProfileRefusal(context.caller)) await acknowledgeToolInput(context.caller.sessionId, context.caller.conversationId, requestId, startedAt)
     .catch(() => logWarn('Prior user input receipt could not be saved; its existing claim is preserved'));
   // Permission can change while the liveness/recovery bookkeeping above awaits disk or browser
   // evidence. A prior refusal is monotonic, while a new revoke must take effect before any
@@ -1055,9 +1077,10 @@ async function dispatchTracked(
   await reconcileAgentRequestOwners().catch(error => {
     logWarn(`Worker ownership recovery deferred after tool completion: ${error instanceof Error ? error.message : String(error)}`);
   });
-  const deliveryPolicyRefusal = strictChatAllowlistEnabled()
+  const deliveryPolicyRefusal = (strictChatAllowlistEnabled()
     ? await conversationAccessRefusal(context.caller.conversationId)
-    : isChatBlocked(context.caller.conversationId) ? BLOCKED_CHAT_REFUSAL : null;
+    : isChatBlocked(context.caller.conversationId) ? BLOCKED_CHAT_REFUSAL : null) ??
+    workerConnectionProfileRefusal(context.caller);
   const deliveryFenced = Boolean(conversationPolicyRefusal) || compacting || supersededConversation || Boolean(silentCeilingWorker) ||
     Boolean(deliveryPolicyRefusal) ||
     compactingConversation(context.caller.conversationId) !== null || Boolean(context.caller.conversationId &&
@@ -1491,7 +1514,9 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
           transportConversation,
           requestIdOf(mcpCtx),
           surface,
-          () => handler(args)
+          () => handler(args),
+          undefined,
+          ctx.setupProfileId ?? null
         );
       }) as never);
     },
@@ -1519,17 +1544,6 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
 }
 
 // ------------------------------------------------------------------ formatters
-
-/**
- * Largest brief a handoff save will accept.
- *
- * Generous on purpose. A brief that hits this is a symptom — the compaction of a very
- * long session — and refusing it there would throw away the one artefact the whole flow
- * exists to produce. The bound is only to keep a runaway generation from being written
- * to disk unbounded; at roughly four characters per token this is comfortably past any
- * single ChatGPT answer.
- */
-export const MAX_HANDOFF_CHARS = 400_000;
 
 /**
  * How long a prime-role `agents` call waits for the calling chat to show its own block.
@@ -1570,26 +1584,6 @@ export const UNATTRIBUTED_DESKTOP_EVIDENCE_MS = evidenceWindow(250);
  * timeout, so a slow proof still comes back as a spawned run rather than as a dead call.
  */
 export const SPAWN_EVIDENCE_MS = evidenceWindow(30_000);
-
-/**
- * Recovers the complete text behind a stored field.
- *
- * A long tool argument or result is bounded inline in the log and written whole beside
- * it; this reads the whole one back so recovery means the exact payload rather than
- * its first eight thousand characters. `complete` is false only when even the overflow
- * copy could not be written, and the caller says so instead of implying otherwise.
- */
-export async function expandStored(
-  sessionId: string,
-  stored: StoredText
-): Promise<{ text: string; complete: boolean }> {
-  if (!stored.truncated) return { text: stored.text, complete: true };
-  if (stored.assetId) {
-    const full = await readOverflowText(sessionId, stored.assetId);
-    if (full !== null) return { text: full, complete: true };
-  }
-  return { text: stored.text, complete: false };
-}
 
 /** Splits on blank lines so a part never ends mid-sentence unless a block is huge. */
 export function chunkText(text: string, size: number): string[] {

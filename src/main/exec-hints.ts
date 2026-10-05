@@ -1559,7 +1559,7 @@ export function execRecoveryHints(
     // method name the batch runner calls, and the caret underline the parser draws under the
     // offending token. Neither appears in ordinary program output, and requiring both keeps a
     // command that merely prints the word Create from claiming a parse failure.
-    (/"Create"/.test(outputText) && /(?:^|\n)\s*\+\s*~{2,}/.test(outputText)) ||
+    (/["“”]?Create["“”]?/i.test(outputText) && /(?:^|\n)\s*\+\s*~{2,}/.test(outputText)) ||
     /FullyQualifiedErrorId\s*:\s*(?:TerminatorExpectedAtEndOfString|MissingArgument|MissingExpressionAfterToken|MissingFileSpecification|RedirectionNotSupported|UnexpectedToken|EmptyPipeElement)/i.test(
       outputText
     );

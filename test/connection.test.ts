@@ -47,6 +47,7 @@ const mocks = vi.hoisted(() => {
     endpointStartGate: null as Promise<void> | null,
     endpointStartError: null as NodeJS.ErrnoException | null,
     endpointStartReached: vi.fn(),
+    endpointContexts: [] as Array<() => unknown>,
     tunnelStartGate: null as Promise<void> | null,
     tunnelStartReached: vi.fn(),
     optionalStartGate: null as Promise<void> | null,
@@ -74,9 +75,10 @@ vi.mock('../src/main/mcp/server.js', () => ({
   lastRequestAt: () => null,
   tunnelProbeHeaders: () => ({}),
   startMcpServer: vi.fn(async (
-    _getContext: unknown,
+    getContext: () => unknown,
     options: { port?: number; publicHostname?: string; surfaceTokens?: Record<string, string> } = {}
   ) => {
+    mocks.endpointContexts.push(getContext);
     mocks.endpointStartReached();
     mocks.endpointOptions = {
       ...(options.port === undefined ? {} : { port: options.port }),
@@ -148,6 +150,7 @@ describe('connection surface state', () => {
     mocks.endpointStartReached.mockClear();
     mocks.endpointOptions = null;
     mocks.surfaceTokens = null;
+    mocks.endpointContexts.length = 0;
     mocks.endpointStartGate = null;
     mocks.endpointStartError = null;
     mocks.tunnelOptions = null;
@@ -307,6 +310,32 @@ describe('connection surface state', () => {
     } finally {
       await connection.disconnect();
       delete (mocks.config.tunnel as any).profileId; delete (mocks.config.tunnel as any).profileEpoch;
+    }
+  });
+
+  it('keeps each MCP endpoint generation pinned to the Setup profile that created it', async () => {
+    mocks.config.tunnel.kind = 'openai';
+    mocks.config.tunnel.tunnelId = 'same-core';
+    Object.assign(mocks.config.tunnel, { profileId: 'default', profileEpoch: 0 });
+    const connection = await import('../src/main/connection.js');
+    try {
+      await connection.connect();
+      const first = mocks.endpointContexts[0]!;
+      expect(first()).toMatchObject({ setupProfileId: 'default' });
+
+      // Config switches first; the old listener can still be draining accepted calls. Its
+      // provenance must remain Default until teardown completes instead of reading the new config.
+      Object.assign(mocks.config.tunnel, { profileId: 'second', profileEpoch: 1 });
+      expect(first()).toMatchObject({ setupProfileId: 'default' });
+      await connection.applySettings();
+
+      expect(mocks.endpointContexts).toHaveLength(2);
+      expect(first()).toMatchObject({ setupProfileId: 'default' });
+      expect(mocks.endpointContexts[1]!()).toMatchObject({ setupProfileId: 'second' });
+    } finally {
+      await connection.disconnect();
+      delete (mocks.config.tunnel as any).profileId;
+      delete (mocks.config.tunnel as any).profileEpoch;
     }
   });
 

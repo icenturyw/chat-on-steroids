@@ -2,6 +2,7 @@ import { UI_LANGUAGES } from '../shared/ui-language.js';
 import { REASONING_EFFORTS } from '../shared/session.js';
 import { appearanceSchema } from './appearance-schema.js';
 import { BROWSER_BRIDGE_PORTS } from '../shared/browser-bridge.js';
+import { CONNECTOR_SUFFIX_MAX, CONNECTOR_SUFFIX_PATTERN } from '../shared/connector-names.js';
 /**
  * Non-secret settings, stored as one small JSON file in the app's userData folder.
  * No database: there are at most a handful of roots and a dozen booleans.
@@ -321,6 +322,8 @@ const configSchema = z.object({
       .optional()
       .default(DEFAULT_CLOUDFLARE_LOCAL_PORT)
   }),
+  // A damaged value falls back to the plain names instead of failing the whole file.
+  connectorSuffix: z.string().trim().max(CONNECTOR_SUFFIX_MAX).regex(CONNECTOR_SUFFIX_PATTERN).optional().catch(undefined),
   setupProfiles: z.array(z.object({
     id: z.string().min(1).max(64), name: z.string().trim().min(1).max(80),
     tunnelId: z.string().max(128), desktopTunnelId: z.string().max(128), pluginsTunnelId: z.string().max(128)
@@ -346,6 +349,7 @@ const configSchema = z.object({
     browserBridgePort: browserBridgePortSchema.optional().default('auto'),
     browserOnly: z.boolean().optional().default(false),
     autoRefreshPlugins: z.boolean().optional().default(false),
+    autoSelectSkills: z.boolean().optional().default(false),
     tabsToKeepOpen: z.number().int().min(1).max(50).optional(),
     minimizeToTray: z.boolean(),
     autoConnect: z.boolean(),
@@ -565,7 +569,7 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
       cloudflarePublicUrl: DEFAULT_CLOUDFLARE_PUBLIC_ORIGIN,
       cloudflareLocalPort: DEFAULT_CLOUDFLARE_LOCAL_PORT
     },
-    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, theme: 'dark', autoRefreshPlugins: false, backgroundChats: true, browserBridgePort: 'auto', autoContinue: true, followOutput: true, mentionCore: true },
+    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, theme: 'dark', autoRefreshPlugins: false, autoSelectSkills: false, backgroundChats: true, browserBridgePort: 'auto', autoContinue: true, followOutput: true, mentionCore: true },
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },
     multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },

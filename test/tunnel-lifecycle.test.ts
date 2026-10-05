@@ -137,6 +137,29 @@ describe('OpenAI tunnel process ownership', () => {
     expect(fixture.spawn).not.toHaveBeenCalled();
   });
 
+  it('serves each run\'s fresh MCP path through the same tunnel id', async () => {
+    // ChatGPT's plugin names the tunnel, not a URL: tunnel-client is told this run's local URL,
+    // token path included, so the per-start token never reaches ChatGPT and a plugin created in an
+    // earlier run still reaches this one (which is why connector proof keeps across restarts).
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('missing', { status: 404 })));
+    const runs: Array<{ args: string[]; url: string }> = [];
+    for (const localUrl of ['http://127.0.0.1:1234/mcp/core/first-run-token', 'http://127.0.0.1:1234/mcp/core/second-run-token']) {
+      const handle = await startTunnel({ localUrl, settings, apiKey: 'test', report: () => {} });
+      // Local builds may resolve the OS/PAC proxy before spawning tunnel-client. The tunnel
+      // handle is intentionally returned while that lookup is in flight so Stop can retire it,
+      // so wait for this run's actual child instead of assuming spawn is synchronous.
+      await vi.waitFor(() => expect(fixture.spawn.mock.calls.length).toBe(runs.length + 1));
+      const call = fixture.spawn.mock.calls.at(-1) as unknown as [string, string[], { env: Record<string, string> }];
+      runs.push({ args: call[1], url: call[2].env.MCP_SERVER_URL ?? '' });
+      await handle.stop();
+    }
+    expect(runs.map(run => run.url)).toEqual(['url=http://127.0.0.1:1234/mcp/core/first-run-token,channel=main',
+      'url=http://127.0.0.1:1234/mcp/core/second-run-token,channel=main']);
+    expect(runs[0]!.args).toEqual(runs[1]!.args);
+    expect(runs[0]!.args).toContain(settings.tunnelId);
+    expect(runs.flatMap(run => run.args).join(' ')).not.toMatch(/run-token/);
+  });
+
   it.each([
     { level: 'WARN', msg: 'poll failed; backing off', error: 'dial tcp: i/o timeout', retry_in_ms: 401 },
     { level: 'WARN', msg: 'poll failed; backing off', error: 'unexpected EOF', retry_in_ms: 403 },

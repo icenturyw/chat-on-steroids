@@ -17,6 +17,7 @@
  * protected-resource metadata request properly and never emits a non-JSON body.
  */
 
+import { noteConnectorUse } from '../connector-proof.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   createInboundTiming,
@@ -434,6 +435,7 @@ export async function startMcpServer(
       requestSeenAt = Date.now();
       surfaceRequestAt.set(route.id, requestSeenAt);
       options.onRequest?.();
+      noteConnectorUse(route.id, 'request', requestSeenAt);
     }
 
     const declaredHeader = req.headers['content-length'];

@@ -7,6 +7,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { connectorProof } from './connector-proof.js';
 import type { ConnectionStatus, SurfaceStatus, TunnelSettings } from '../shared/types.js';
 import { requiresApprovedFilesystemRoot } from '../shared/capabilities.js';
 import {
@@ -215,7 +216,10 @@ function describeSurfaces(): SurfaceStatus[] {
       // created the Desktop connector in ChatGPT. Publication is our side of the wire;
       // these two are the only evidence of the other side.
       lastRequestAt: lastRequestAt(surface.id),
-      lastToolCallAt: lastToolCallAt(surface.id)
+      lastToolCallAt: lastToolCallAt(surface.id),
+      // The same evidence from earlier runs, on the tunnel this connector uses now: Setup's
+      // proof that the plugin exists in ChatGPT before it calls again this session.
+      proof: connectorProof(surface.id)
     };
   });
 }

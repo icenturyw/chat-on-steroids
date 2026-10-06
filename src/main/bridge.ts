@@ -220,6 +220,7 @@ import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
 import { conversationHasMcpCallSince, readHandoffResponse } from './session/store.js';
 import { sessionWorkingAt } from '../shared/session-activity.js';
 import { requestCorrelation } from './session/correlation.js';
+import { completeImageExport, IMAGE_EXPORT_BODY_BYTES, pendingImageExports } from './image-export.js';
 import { bindAgentWorkspace } from './workspace.js';
 import { extensionUpdateOffer, prepareExtensionUpdate, shippedExtensionBuild } from './extension-path.js';
 
@@ -695,6 +696,13 @@ function chatHeldElsewhere(conversationId: string, browser: string | null): bool
 const REVEAL_COLLECT_MS = 4_000;
 const revealBrowsers = new Map<string, number>();
 const pendingReveals: Array<{ conversationId: string; settle: (shown: boolean) => void }> = [];
+
+/** Browsers whose extension can fetch a generated image's original for the image export (#889). */
+const imageExportBrowsers = new Map<string, number>();
+export function imageExportCapable(): boolean {
+  const now = Date.now();
+  return browserWakeConnected() && [...imageExportBrowsers.values()].some(at => now - at < OPENING_CUSTODY_MS);
+}
 
 function revealCapable(): boolean {
   const now = Date.now();
@@ -1835,7 +1843,8 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
     finishGoalDraft: getSessionFinishDraft(sessionId, activeTurnId),
     finishWaiting,
     goalDraft: draft ? { stage: draft.stage, model: draft.model, text: draft.text.slice(-8000), error: draft.error } : null,
-    goalWait: !blocked && !draft && goalActiveFor(id) ? await goalWaitFor(id, sessionId) : null,
+    goalWait: !blocked && !draft && goalActiveFor(id)
+      ? await goalWaitFor(id, sessionId, Date.now(), session.browserRecoveryDismissedAt !== undefined) : null,
     stopPending: commands.some(c => c.spec.type === 'stop' && c.spec.sessionId === sessionId && c.spec.turnId === activeTurnId),
     objective: goalObjectiveFor(id),
     loopAfterTurn: control.afterTurn,
@@ -2346,8 +2355,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     let openConversations: string[] = [];
     let stalledConversations: string[] = [];
     let revealRequested = false;
+    let imageExportRequested = false;
     if (req.method === 'POST') {
-      const body = await readBody(req) as { openConversations?: unknown; stalledConversations?: unknown; updateHold?: unknown; canReveal?: unknown; chatGptSignedIn?: unknown };
+      const body = await readBody(req) as { openConversations?: unknown; stalledConversations?: unknown; updateHold?: unknown; canReveal?: unknown; canExportImages?: unknown; chatGptSignedIn?: unknown };
       if (!Array.isArray(body?.openConversations) || body.openConversations.length > 10_000 || body.openConversations.some(id => !conversationId(id))) {
         return json(res, 400, { error: 'invalid_open_conversations' }, origin);
       }
@@ -2359,6 +2369,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       stalledConversations = (body.stalledConversations ?? []) as string[];
       noteExtensionUpdateHold(body.updateHold);
       revealRequested = body.canReveal === true;
+      imageExportRequested = body.canExportImages === true;
       if (req.headers['x-extension-host'] === 'browser' && externalExtension?.browserId !== undefined &&
           externalExtension.browserId === browserOf(req)) {
         noteExternalLogin(externalExtension.browserId, typeof body.chatGptSignedIn === 'boolean' ? body.chatGptSignedIn : null);
@@ -2398,6 +2409,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (browser && req.method === 'POST') browserChats.set(browser, openSet);
     const canReveal = req.method === 'POST' && revealRequested;
     if (canReveal) revealBrowsers.set(browser ?? '', Date.now());
+    if (req.method === 'POST' && imageExportRequested) imageExportBrowsers.set(browser ?? '', Date.now());
     const pendingInputs = await pendingBrowserInputs();
     const pendingIds = new Set(pendingInputs.map(input => input.id));
     for (const id of openingCustody.keys()) if (!pendingIds.has(id)) openingCustody.delete(id);
@@ -2430,6 +2442,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         revivals,
         placement: pendingBrowserPlacement(null, browser),
         ...(canReveal ? { reveals: takeReveals(browser) } : {}),
+        ...(req.method === 'POST' && imageExportRequested ? { imageExports: pendingImageExports() } : {}),
         // A failure report closes this request. Reissuing the repair in the same response would
         // replace the visible failure with "Trying" before a renderer could ever observe it.
         repairs: repairFailed || repairHeld ? [] : await takePendingRepairs(Date.now(), browser),
@@ -2449,6 +2462,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
 
   // ChatGPT's own plugin list names the Core plugin: it is created in this account. The id is only
   // checked for shape; what it proves is existence, which Setup reads instead of a test message.
+  // A generated image's original, fetched by the page that shows it, for one pending export (#889).
+  if (route === '/image-export' && req.method === 'POST') {
+    let body: unknown;
+    try { body = await readBody(req, IMAGE_EXPORT_BODY_BYTES); }
+    catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    return json(res, 200, { ok: await completeImageExport(body) }, origin);
+  }
   if (route === '/core-plugin' && req.method === 'POST') {
     const body = await readBody(req) as Record<string, unknown>;
     // ChatGPT's complete plugins list no longer names this install's Core: deleted or disconnected.
@@ -6588,7 +6611,7 @@ async function goalInputPriority(conversationId: string, sessionId: string, turn
 }
 
 /** Both UIs describe the same existing reply and work deadlines, without another clock owner. */
-async function goalWaitFor(conversationId: string, sessionId: string, now = Date.now()): Promise<import('../shared/goal.js').GoalWait | null> {
+async function goalWaitFor(conversationId: string, sessionId: string, now = Date.now(), closed = false): Promise<import('../shared/goal.js').GoalWait | null> {
   const pending = goalPendingReplyFor(conversationId);
   if (!pending) {
     const countdowns = await sessionRecoveryCountdowns(sessionId, conversationId);
@@ -6600,6 +6623,9 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
   // rather than deciding from a context that is about to change. No deadline: the wait ends
   // when the last worker stops, and a countdown would only be a second, guessed clock.
   if (waitingForSubAgents(conversationId)) return { reason: 'workers' };
+  // The person closed this chat's tab, and browser recovery waits for its page to return: the
+  // owed turn is collected then. Until that, nothing is settling, so the window says so.
+  if (closed) return { reason: 'closed' };
   if ((pending.listenUntil ?? 0) > now) return { reason: pending.silenceSourceTurnId ? 'listening' : 'native-busy', until: pending.listenUntil };
   const grant = activeUntil.get(conversationId);
   if (grant?.sessionId === sessionId && grant.mcpBacked && !grant.thinkingFailed && grant.until > now)
@@ -7953,24 +7979,48 @@ function browserRecoveryMonitoring(): boolean {
  * asks whether a conversation is still alive, so nothing scoped to one of its turns may switch
  * it off — see the supersede rule in `queueBrowserRecovery`.
  */
+/**
+ * Why silence recovery left a chat alone, said once per grant and reason (#1086).
+ *
+ * Every exit of the sweep used to be silent, so a chat that never got its automatic Continue left
+ * a log that simply stopped: the 2026-10-05 report showed a confirmed error reload and then
+ * seventeen quiet minutes. Repeated sweeps of the same grant say nothing new.
+ */
+const silenceNotes = new Set<string>();
+function noteSilence(conversationId: string, grant: ActivityGrant, reason: string): void {
+  const key = `${conversationId}:${grant.turnId ?? '-'}:${grant.sessionId}:${reason}`;
+  if (silenceNotes.has(key)) return;
+  silenceNotes.add(key);
+  if (silenceNotes.size > 500) for (const old of [...silenceNotes].slice(0, 100)) silenceNotes.delete(old);
+  logInfo(`bridge: silence recovery for ${conversationId} — ${reason}`);
+}
+
 async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent: string[] }> {
   let queued = false;
   let deferred = false;
   const spent: string[] = [];
   const compacting = new Set(pendingContinuations().map((entry) => entry.from));
   for (const [conversationId, grant] of activeUntil) {
-    if (compacting.has(conversationId)) continue;
     if (grant.until > now) continue;
+    if (compacting.has(conversationId)) { noteSilence(conversationId, grant, 'a Compact & Resume handoff owns this chat\'s recovery'); continue; }
     // Observation owns liveness, never permission to interrupt the native page.
     // Only an exactly recorded local call in this source turn earns silence repair.
     if (!grant.turnId || !await turnHasMcpCall(grant.sessionId, conversationId, grant.turnId)) {
-      if (activeUntil.get(conversationId) === grant) spent.push(conversationId);
+      if (activeUntil.get(conversationId) === grant) {
+        noteSilence(conversationId, grant, grant.turnId
+          ? `not available: turn ${grant.turnId} has no tool call recorded for this chat (calls from ChatGPT's code mode are often not attributed)`
+          : 'not available: the silent work has no turn');
+        spent.push(conversationId);
+      }
       continue;
     }
     const pro = await extendedSilenceWindowFor(conversationId, grant.sessionId);
     const afterTurn = recoveryInputAllowed(grant.sessionId, conversationId) || loopAfterTurnFor(conversationId) || await hasQueuedAfterTurnInput(grant.sessionId);
     if (activeUntil.get(conversationId) !== grant) continue;
     if (runningToolProgress(conversationId) || (afterTurn && runningToolCalls(conversationId) > 0)) {
+      noteSilence(conversationId, grant, runningToolProgress(conversationId)
+        ? 'waiting: a tool call of this chat is still running'
+        : 'waiting: a tool call whose chat is not known yet is running, and it might be this chat\'s');
       grant.until = now + GOAL_QUIET_MS;
       deferred = true;
       continue;
@@ -7981,6 +8031,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     // measured. (A blocked chat's worker slot is not this pass's business: sweepStaleSwarm
     // sleeps it from the block itself, grant or no grant.)
     if (isChatBlocked(conversationId)) {
+      noteSilence(conversationId, grant, 'not available: this chat is blocked');
       spent.push(conversationId);
       continue;
     }
@@ -7999,6 +8050,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
         deferred = true;
         continue;
       }
+      noteSilence(conversationId, grant, 'not available: automatic recovery is off for this chat and no Goal, Loop or queued message waits on it');
       spent.push(conversationId);
       continue;
     }
@@ -8009,6 +8061,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
         deferred = true;
         continue;
       }
+      noteSilence(conversationId, grant, `spent: its ${held.reason} reload already happened`);
       spent.push(conversationId);
       continue;
     }
@@ -8026,6 +8079,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     // has run out.
     const lastReload = lastBrowserRecoveryAt.get(conversationId) ?? 0;
     if (awaitingReturn.has(conversationId) && now - lastReload < BROWSER_RECOVERY_COOLDOWN_MS) {
+      noteSilence(conversationId, grant, 'waiting: the page has not come back from the last reload yet');
       grant.until = lastReload + BROWSER_RECOVERY_COOLDOWN_MS;
       deferred = true;
       continue;
@@ -8038,7 +8092,10 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
         // Preserve its original silence deadline so a real page return does
         // not pretend to be fresh work or start another waiting window.
         if (!grant.thinkingFailed && now < activityDeadline(grant)) deferred = true;
-        else spent.push(conversationId);
+        else {
+          noteSilence(conversationId, grant, 'spent: the silent work is no longer this chat\'s current turn (a newer question, a close or a Stop)');
+          spent.push(conversationId);
+        }
       }
       continue;
     }
@@ -9077,6 +9134,12 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | 'r
         );
       }
       if (repair.reason === 'assistant-error') {
+        // The automatic Continue after this reload comes only through the silence watch, which needs
+        // this chat's activity grant (#1086). Without one nothing follows, so say so.
+        const watch = activeUntil.get(conversationId);
+        logInfo(watch
+          ? `bridge: ${conversationId} stays under the silence watch after its error reload (turn ${watch.turnId ?? 'unknown'})`
+          : `bridge: ${conversationId} has no activity left for the silence watch after its error reload; no automatic Continue follows unless it works again`);
         // Charge the original question, never the replacement document seen at ACK time.
         if (repair.assistantSource) turnRepairSpent.set(conversationId,
           { sessionId: repair.sessionId, turnKey: repair.assistantSource.key, token: repair.token, at: Date.now() });
@@ -10382,6 +10445,7 @@ export function resetBridgeForTests(): void {
   browserSeenAt.clear();
   browserChats.clear();
   revealBrowsers.clear();
+  imageExportBrowsers.clear();
   for (const entry of pendingReveals.splice(0)) entry.settle(false);
   openingCustody.clear();
   extensionVersion = null;

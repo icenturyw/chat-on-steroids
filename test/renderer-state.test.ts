@@ -624,6 +624,149 @@ it('shows committed resume inheritance as trusted and revokes it through the cur
   await vi.waitFor(() => expect(setSessionTrusted).toHaveBeenCalledWith(session.id, current, false));
 });
 
+it('names a chat in place: Enter saves, Escape keeps the old name, empty restores ChatGPT\'s title, repaints keep the field (#1107)', async () => {
+  const session = {
+    id: 'rename-session-0001', title: 'ChatGPT title', conversationId: 'rename-conversation-0001', chatIds: ['rename-conversation-0001'],
+    startedAt: 1, updatedAt: 2, endedAt: null, events: 0, userMessages: 0, toolCalls: 0,
+    lastToolCallAt: null, processExitNonzero: 0, toolRejected: 0, toolInternalErrors: 0, errors: 0,
+    estimatedTokens: 0, contextTokens: 0, lastTurnOutcome: null, activeTurnId: null, agents: [], origin: null
+  };
+  const renameSession = vi.fn(async () => ({ ok: true, data: true }));
+  const mounted = await mountChat({}, [], {
+    listProjects: async () => ({ ok: true, data: [] }),
+    listSessions: async () => ({ ok: true, data: { sessions: [session], activeId: null, pressure: [], blocked: [], trusted: [] } }),
+    renameSession
+  });
+  const doc = mounted.window.document;
+  const row = () => doc.querySelector<HTMLElement>(`[data-id="${session.id}"]`)!;
+  const field = () => row().querySelector<HTMLInputElement>('.sess-rename');
+  await vi.waitFor(() => expect(row().querySelector('button.sess-name')).not.toBeNull());
+  expect(field()).toBeNull();
+  const press = (key: string) => field()!.dispatchEvent(new mounted.window.KeyboardEvent('keydown', { key, bubbles: true }));
+  const type = (text: string) => { field()!.value = text; field()!.dispatchEvent(new mounted.window.Event('input', { bubbles: true })); };
+
+  // Escape: nothing is saved, the title is back.
+  row().querySelector<HTMLButtonElement>('button.sess-name')!.click();
+  await vi.waitFor(() => expect(field()).not.toBeNull());
+  expect(field()!.value).toBe('ChatGPT title');
+  type('Never saved');
+  press('Escape');
+  await vi.waitFor(() => expect(field()).toBeNull());
+  expect(renameSession).not.toHaveBeenCalled();
+  expect(row().querySelector('.sess-top b')!.textContent).toBe('ChatGPT title');
+
+  // The sidebar repaints while the user types; the field and its text survive.
+  row().querySelector<HTMLButtonElement>('button.sess-name')!.click();
+  await vi.waitFor(() => expect(field()).not.toBeNull());
+  type('  Release   prep  ');
+  const editing = field();
+  mounted.push(structuredClone(mounted.state));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  // The same node: an input method's composition would not survive a replaced field.
+  expect(field()).toBe(editing);
+  expect(field()?.value).toBe('  Release   prep  ');
+  press('Enter');
+  await vi.waitFor(() => expect(renameSession).toHaveBeenCalledWith(session.id, 'Release   prep'));
+
+  // Empty asks for ChatGPT's title again.
+  row().querySelector<HTMLButtonElement>('button.sess-name')!.click();
+  await vi.waitFor(() => expect(field()).not.toBeNull());
+  type('   ');
+  press('Enter');
+  await vi.waitFor(() => expect(renameSession).toHaveBeenLastCalledWith(session.id, null));
+});
+
+it('searches chats from the sidebar: results replace the lists, matches are marked, Escape brings the lists back (#1107)', async () => {
+  const base = { conversationId: null, chatIds: [], startedAt: 1, updatedAt: 2, endedAt: null, events: 0, userMessages: 0, toolCalls: 0,
+    lastToolCallAt: null, processExitNonzero: 0, toolRejected: 0, toolInternalErrors: 0, errors: 0,
+    estimatedTokens: 0, contextTokens: 0, lastTurnOutcome: null, activeTurnId: null, agents: [], origin: null };
+  const listed = { ...base, id: 'search-listed-0001', title: 'Listed chat', conversationId: 'search-listed-conversation' };
+  let indexed = 1;
+  const searchSessions = vi.fn(async (query: string) => ({ ok: true, data: query === 'bridge' ? {
+    results: [{ id: 'search-hit-0001', title: 'Release planning', projectId: null,
+      snippet: { text: '…then the bridge gets its installer.', matches: [[10, 16]] } }],
+    indexed, total: 3 } : { results: [], indexed: 3, total: 3 } }));
+  const getSession = vi.fn(async (id: string) => ({ ok: true, data: { summary: { ...base, id, title: 'Release planning' }, events: [], total: 0, nextFrom: 1 } }));
+  const mounted = await mountChat({}, [], {
+    listProjects: async () => ({ ok: true, data: [] }),
+    listSessions: async () => ({ ok: true, data: { sessions: [listed], activeId: null, pressure: [], blocked: [], trusted: [] } }),
+    searchSessions, getSession
+  });
+  const doc = mounted.window.document;
+  const field = doc.getElementById('chatSearch') as HTMLInputElement;
+  const results = doc.getElementById('searchResults')!;
+  const lists = doc.getElementById('sessionList')!;
+  await vi.waitFor(() => expect(doc.querySelector('[data-id="search-listed-0001"]')).not.toBeNull());
+  expect(results.hidden).toBe(true);
+
+  field.value = 'bridge';
+  field.dispatchEvent(new mounted.window.Event('input', { bubbles: true }));
+  await vi.waitFor(() => expect(results.querySelector('.search-result')).not.toBeNull());
+  expect(lists.hidden).toBe(true);
+  expect(results.hidden).toBe(false);
+  expect((doc.getElementById('chatSearchClear') as HTMLButtonElement).hidden).toBe(false);
+  expect(results.querySelector('.search-result b')!.textContent).toBe('Release planning');
+  expect([...results.querySelectorAll('.search-snippet mark')].map(mark => mark.textContent)).toEqual(['bridge']);
+  // Indexing is not done yet: the result says so, and asks again until it is.
+  expect(results.querySelector('.search-status')!.textContent).toContain('1 of 3');
+  indexed = 3;
+  await vi.waitFor(() => expect(results.querySelector('.search-status')).toBeNull());
+
+  (results.querySelector('.search-result') as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(getSession).toHaveBeenCalledWith('search-hit-0001', expect.anything()));
+  expect(results.querySelector('.search-result')!.classList.contains('is-sel')).toBe(true);
+
+  field.value = 'nothing';
+  field.dispatchEvent(new mounted.window.Event('input', { bubbles: true }));
+  await vi.waitFor(() => expect(results.textContent).toContain('No chats match'));
+
+  field.dispatchEvent(new mounted.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await vi.waitFor(() => expect(lists.hidden).toBe(false));
+  expect(results.hidden).toBe(true);
+  expect(field.value).toBe('');
+});
+
+it.each([['Win32', 'ctrlKey', 'metaKey'], ['MacIntel', 'metaKey', 'ctrlKey']] as const)(
+  'focuses chat search with the primary shortcut on %s, never from the terminal, and says when results were capped', async (platform, primary, other) => {
+  vi.stubGlobal('navigator', { ...globalThis.navigator, platform });
+  try {
+    const base = { conversationId: null, chatIds: [], startedAt: 1, updatedAt: 2, endedAt: null, events: 0, userMessages: 0, toolCalls: 0,
+      lastToolCallAt: null, processExitNonzero: 0, toolRejected: 0, toolInternalErrors: 0, errors: 0,
+      estimatedTokens: 0, contextTokens: 0, lastTurnOutcome: null, activeTurnId: null, agents: [], origin: null };
+    const listed = { ...base, id: 'search-shortcut-0001', title: 'Listed chat', conversationId: 'search-shortcut-conversation' };
+    const mounted = await mountChat({}, [], {
+      listProjects: async () => ({ ok: true, data: [] }),
+      listSessions: async () => ({ ok: true, data: { sessions: [listed], activeId: null, pressure: [], blocked: [], trusted: [] } }),
+      searchSessions: async () => ({ ok: true, data: { results: [{ id: 'search-shortcut-0001', title: 'Listed chat', projectId: null }],
+        indexed: 1, total: 1, limited: true } })
+    });
+    const doc = mounted.window.document;
+    const field = doc.getElementById('chatSearch') as HTMLInputElement;
+    await vi.waitFor(() => expect(doc.querySelector('[data-id="search-shortcut-0001"]')).not.toBeNull());
+    const press = (target: EventTarget, modifier: string) =>
+      target.dispatchEvent(new mounted.window.KeyboardEvent('keydown', { key: 'k', [modifier]: true, bubbles: true, cancelable: true }));
+    expect(press(doc.body, other)).toBe(true);
+    expect(doc.activeElement).not.toBe(field);
+    // Ctrl+K deletes to the end of the line in a shell; the terminal keeps it.
+    const terminal = doc.createElement('div');
+    terminal.className = 'xterm';
+    const input = terminal.appendChild(doc.createElement('textarea'));
+    doc.body.append(terminal);
+    input.focus();
+    expect(press(input, primary)).toBe(true);
+    expect(doc.activeElement).toBe(input);
+    expect(press(doc.body, primary)).toBe(false);
+    expect(doc.activeElement).toBe(field);
+
+    field.value = 'listed';
+    field.dispatchEvent(new mounted.window.Event('input', { bubbles: true }));
+    await vi.waitFor(() => expect(doc.getElementById('searchResults')!.textContent)
+      .toContain('Showing the first 1 matches. Add a word to narrow them down.'));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
 it('shows an inherited Block ahead of Trust on a committed resumed row', async () => {
   const source = 'strict-resume-blocked-source-0001';
   const current = 'strict-resume-blocked-current-0001';
@@ -1519,6 +1662,33 @@ it('highlights missing required setup fields while respecting drafts and a store
   expect(key.classList.contains('is-empty')).toBe(true);
   expect(mounted.keys).toEqual([]);
   expect(mounted.calls).toEqual([]);
+});
+
+it('names every connector ChatGPT never called, joined in the UI language', async () => {
+  const mounted = await mountChat({ hasApiKey: true });
+  const doc = mounted.window.document;
+  const surface = (id: string, connectorName: string, optional: boolean, called: boolean) => ({
+    id, connectorName, description: '', cardSummary: '', optional, available: true, localUrl: null, publicUrl: null, tools: ['read'],
+    state: 'live', detail: '', lastRequestAt: called ? Date.now() - 60_000 : null, lastToolCallAt: called ? Date.now() - 60_000 : null, proof: null
+  });
+  const state = structuredClone(mounted.state);
+  state.status.state = 'connected';
+  state.status.lastRequestAt = Date.now() - 60_000;
+  state.status.lastToolCallAt = Date.now() - 60_000;
+  state.status.surfaces = [surface('core', 'Core', false, true), surface('desktop', 'Desktop', true, false), surface('plugins', 'Plugins', true, false)];
+  mounted.push(state);
+  const note = () => doc.getElementById('wizChatgpt')!.textContent!;
+  expect(note()).toContain('“Desktop” and “Plugins” have never been called — create them in ChatGPT');
+  const { setLanguage } = await import('../src/renderer/i18n.js');
+  setLanguage('de');
+  try {
+    // One language throughout: no English "and", and the plural grammar.
+    expect(note()).toContain('“Desktop” und “Plugins” wurden noch nie aufgerufen – lege sie in ChatGPT an');
+  } finally { setLanguage('en'); }
+  const single = structuredClone(state);
+  single.status.surfaces = [surface('core', 'Core', false, true), surface('desktop', 'Desktop', true, false)];
+  mounted.push(single);
+  expect(note()).toContain('“Desktop” has never been called — create it in ChatGPT');
 });
 
 it('counts a plugin ChatGPT used in an earlier run, so a restart does not reopen Setup', async () => {

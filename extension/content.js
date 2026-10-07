@@ -2187,7 +2187,17 @@
    * is what makes `lastChangeAt` mean anything.
    */
   function turnStalled() {
-    return turnStartedAt > 0 && Date.now() - lastChangeAt > STALL_MS;
+    return turnStartedAt > 0 && Date.now() - stallClock() > STALL_MS;
+  }
+
+  /**
+   * `lastChangeAt`, held at now while ChatGPT's tool approval card waits for the user: that wait
+   * is not a stall, and calling it one told the user the turn had died (VM stress test,
+   * 2026-10-06). Once the card is answered, ten quiet minutes count from that moment.
+   */
+  function stallClock() {
+    if (turnStartedAt > 0 && CLF_DOM.approvalWaiting()) lastChangeAt = Math.max(lastChangeAt, Date.now());
+    return lastChangeAt;
   }
 
   /** Exact aliases match shared/chat-models.ts::isProModel (the extension is plain JS). */
@@ -2897,7 +2907,7 @@
       // generic stall, including when it appears after a long quiet run.
       const thinkingFailure = quietOutcome?.reason === 'thinking_failed' || visibleErrors.some(
         error => error.reason === 'thinking_failed' && localErrorGeneration(error) === turnId && !isStale(error.node));
-      if (!thinkingFailure && !stallReported && Date.now() - lastChangeAt > STALL_MS && !deliberateTurnLive()) {
+      if (!thinkingFailure && !stallReported && Date.now() - stallClock() > STALL_MS && !deliberateTurnLive()) {
         stallReported = true;
         emit({
           kind: 'chat_error',
@@ -6695,7 +6705,9 @@
         fiber: fiberPresent === null ? undefined : !fiberPresent ? 'absent' : fiberTurns.size === 0 ? 'empty' : 'ok',
         // This document's own open turn, which it closes itself on end_turn or after ten
         // minutes without progress. Keeps a long-thinking worker from being slept as silent.
-        generating
+        generating,
+        // ChatGPT's own approval card: the turn waits for a person, so the app tells them.
+        approval: CLF_DOM.approvalWaiting()
       });
       if (!reply || reply.ok !== true || !reply.data) {
         // Keep waiting only for failures that can genuinely mean "the local app/worker is
@@ -9827,7 +9839,11 @@
         renderControl();
         return;
       }
-      if (!sameSource() || CLF_DOM.composer() !== composer || squeeze(composer.textContent) !== squeeze(prompt)) {
+      // React may replace the editor node while the durable send permit is pending.
+      // Reacquire the current editable composer and verify the exact frozen prompt: an
+      // unchanged draft survives remounts, while changed or user-owned text still fails closed.
+      const sendComposer = editable();
+      if (!sameSource() || !sendComposer || squeeze(sendComposer.textContent) !== squeeze(prompt)) {
         CLF_DOM.clearPromptExact(prompt);
         return void (await abandonBeforeSend(
           t(
@@ -11315,7 +11331,7 @@
   }
 
   /** Matches the app's WORKER_REDEEM_MS: past it the app has already failed the command. */
-  const REDEEM_RETRY_WINDOW_MS = 20_000;
+  const REDEEM_RETRY_WINDOW_MS = 45_000;
 
   async function deliverCommand(id, fromUrl = true, reportClaim = () => undefined, attempt = null) {
     // Which conversation, if any, this delivery is entitled to type into.
@@ -11430,9 +11446,12 @@
     }
     reportClaim(true);
 
-    const fail = (why) => {
+    const fail = (why, detail) => {
       if (attempt) attempt.phase = 'failed';
-      return ask({ type: 'ack', id: boot.id, status: 'failed', error: why, client: RUN_ID });
+      return ask({
+        type: 'ack', id: boot.id, status: 'failed', error: why, client: RUN_ID,
+        ...(typeof detail === 'string' && detail ? { detail } : {})
+      });
     };
     // Where this page is, so a command that runs out of time can say where it stopped. Never
     // awaited: a report must not slow or block the bootstrap, and older apps ignore it.
@@ -11450,11 +11469,16 @@
           'the Project entry no longer matches the source conversation; nothing was sent'
         )));
       }
-      if (!(await CLF_DOM.enterProject(projectEntry, () => alive && !attempt?.cancelled))) {
+      let projectEntryFailure = 'unknown';
+      if (!(await CLF_DOM.enterProject(
+        projectEntry,
+        () => alive && !attempt?.cancelled,
+        reason => { if (typeof reason === 'string' && reason) projectEntryFailure = reason; }
+      ))) {
         return void (await fail(t(
           'content_bootstrap_project_open_failed',
           'ChatGPT could not open the source Project through its native link; nothing was sent'
-        )));
+        ), 'project-entry:' + projectEntryFailure));
       }
       // The provider's own SPA link consumes the opening URL. Carry this claimed command
       // onto the proven Project route, then fence every later await to that navigation epoch.

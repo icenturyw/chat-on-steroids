@@ -57,6 +57,7 @@
 .ph.ph-corners-out::before { content: '\e1d0'; }
 .ph.ph-cube::before { content: '\e1da'; }
 .ph.ph-dots-three::before { content: '\e1fe'; }
+.ph.ph-dots-three-vertical::before { content: '\e208'; }
 .ph.ph-download-simple::before { content: '\e20c'; }
 .ph.ph-eye::before { content: '\e220'; }
 .ph.ph-file::before { content: '\e230'; }
@@ -76,8 +77,10 @@
 .ph.ph-magnifying-glass-minus::before { content: '\e30e'; }
 .ph.ph-magnifying-glass-plus::before { content: '\e310'; }
 .ph.ph-monitor::before { content: '\e32e'; }
+.ph.ph-palette::before { content: '\e6c8'; }
 .ph.ph-paw-print::before { content: '\e648'; }
 .ph.ph-pencil-simple::before { content: '\e3b4'; }
+.ph.ph-plug::before { content: '\e946'; }
 .ph.ph-push-pin-simple::before { content: '\e65c'; }
 .ph.ph-play::before { content: '\e3d0'; }
 .ph.ph-plus::before { content: '\e3d4'; }
@@ -87,6 +90,7 @@
 .ph.ph-robot::before { content: '\e762'; }
 .ph.ph-sidebar-simple::before { content: '\ec24'; }
 .ph.ph-sliders-horizontal::before { content: '\e434'; }
+.ph.ph-sparkle::before { content: '\e6a2'; }
 .ph.ph-star::before { content: '\e46a'; }
 .ph.ph-sign-in::before { content: '\e428'; }
 .ph.ph-sign-out::before { content: '\e42a'; }

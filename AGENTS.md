@@ -2077,6 +2077,9 @@ opening authority; navigation and delayed adoption never fabricate another submi
 An exact terminal Fiber descriptor on the latest assistant turn also vetoes recovery of an
 unrecorded generation from a persistent Stop control. An older terminal before a newer user
 question grants no such veto; a presentation artifact must not mint another active turn.
+A recovered generation has no Send baseline. Its history is the finals Fiber reported before
+the generation was first seen plus those drawn above its question; a final that arrives inside
+the settle window for that question is its own and may end it.
 
 Native Send/Stop controls belong to the current composer's form and must be rendered outside
 transcript/extension surfaces. Hidden, inert or quoted controls grant no action; multiple Send
@@ -2564,6 +2567,9 @@ tab: if the browser finds one by the time it acts (often the tab a worker wake j
 still loading or answers `clf-page-status`, it reports `repairAction=present` and never reloads it,
 which used to cut a wake off mid-send (#864). Only a silent tab is reloaded. “Recover agents” is not blanket
 permission to reopen the session list. A plain historical chat with no current work is unprotected.
+A bare open turn counts as current work for a closed tab for one hour after its start
+(`OPEN_TURN_RECOVERY_MS`); activity in the silence window counts however old the turn is. A turn
+left open by a page that went away days ago must not reopen its tab on a brief visit.
 An explicit `/closed` departure with `manual: true` persists `browserRecoveryDismissedAt` in the
 existing session metadata and withdraws every unexecuted browser repair. It revokes synthetic
 silence inputs while retaining authored input, continuation tickets, exact request ownership
@@ -2810,7 +2816,16 @@ awaiting-summary -> awaiting-chat -> claimed -> committing -> committed
    `turn_end`, exactly one nonempty final. That outranks the mounted Fiber shape, which can
    lose the terminal when ChatGPT remounts a long answer under another assistant id. A second
    generation for the same user message (Retry/regenerate) fails closed; never pick the
-   newest final. The user may edit the **content instructions** used to
+   newest final. After #1205 resolves the native GPT-6 `dil` reference to its
+   `fallbackMarkdown`, large stable finals can still have more than 120k of
+   rendered HTML. The page attaches a bounded (256k), escaped visible-text
+   rendering only with a unique, exact native/Fiber/selection message owner;
+   duplicate, foreign and positional-only DOM associations never authorize it.
+   Content and the `/events` parser preserve this larger final; the existing
+   recorder cap spills full HTML to an overflow asset. The handoff reader retrieves
+   the whole authored text (and any overflow) before the existing 96k-character
+   replacement-prompt budget retains its beginning and end. Ordinary streaming
+   markup keeps the 120k presentation cap. The user may edit the **content instructions** used to
    write that brief; continuation markers, send/provenance framing, tool-detail policy and the
    requirement that the compaction reply contain only the brief remain code-owned invariants.
    The shipped content prompt asks for a lossless, dense operational handoff: roughly

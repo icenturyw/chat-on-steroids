@@ -469,6 +469,8 @@ type CommandStep = typeof COMMAND_STEPS[number];
  * the model takes seconds; this leaves room for a throttled background tab.
  */
 const RESUME_STEP_STALL_MS = 3 * 60_000;
+/** How long a turn's start alone, with no activity since, keeps its closed tab worth reopening. */
+const OPEN_TURN_RECOVERY_MS = 60 * 60_000;
 const RESUME_STALL_STEPS: ReadonlySet<CommandStep> = new Set(['composer', 'model', 'composer-after-model']);
 
 const COMMAND_STEP_TEXT: Record<CommandStep, string> = {
@@ -1523,7 +1525,12 @@ function parseObservations(input: unknown): ChatObservation[] {
       if (!trace || !observation.turnId) continue;
       observation.trace = trace;
     }
-    if (typeof item['renderedHtml'] === 'string') observation.renderedHtml = item['renderedHtml'].slice(0, 120_000);
+    if (typeof item['renderedHtml'] === 'string') {
+      // Keep the whole compact rendering of a stable final through /events.
+      // Cutting its last 100k here could silently lose the end of a handoff.
+      const finalAssistant = kind === 'assistant_message' && item['state'] === 'final' && item['final'] === true;
+      observation.renderedHtml = item['renderedHtml'].slice(0, finalAssistant ? 256_000 : 120_000);
+    }
     if (item['state'] === 'streaming' || item['state'] === 'final') observation.state = item['state'];
     if (typeof item['fiberConversationId'] === 'string') {
       const fiberId = conversationId(item['fiberConversationId']);
@@ -2439,8 +2446,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         inputs: [...pendingInputs.filter(input => (!input.conversationId || runningToolCalls(input.conversationId) === 0) &&
             !inputHeldElsewhere(input, browser)),
           ...inputRows.filter(row => row.lifetime === 'temporary-planner' && ['sent', 'cancelled', 'failed'].includes(row.state))
+            // After Send, ChatGPT moves a helper to /c/<id>?temporary-chat=true without its cos-input
+            // marker; its chat is the only way a later close pass can find that tab again.
             .map(row => ({ id: row.id, owner: row.owner, lifetime: row.lifetime, close: true,
-              retire: true }))],
+              retire: true, ...(row.conversationId ? { conversationId: row.conversationId } : {}) }))],
         background: getConfig().ui.backgroundChats === true,
         browserOnly: getConfig().ui.browserOnly === true,
         browserWorkArea: currentBrowserWorkArea(),
@@ -2824,9 +2833,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // Read before closeConversation() forgets the page: the
       // page's own open turn, or this app's standing definition of a chat that is working —
       // an attributed call or current-turn observation inside the silence window.
+      // A bare open turn ages out: one left open by a page that went away days ago is not a
+      // running turn, and reopening its tab on a brief visit only wakes the ten-minute watchdog
+      // (2026-10-09). Activity in the silence window still counts however old the turn is.
       const working =
         liveConversations().some(
-          (entry) => entry.conversationId === id && (entry.generating || Boolean(entry.activeTurnId))
+          (entry) => entry.conversationId === id && (entry.generating || Boolean(entry.activeTurnId)) &&
+            (entry.activeTurnStartedAt === null || Date.now() - entry.activeTurnStartedAt < OPEN_TURN_RECOVERY_MS)
         ) || (activeUntil.get(id)?.until ?? 0) > Date.now();
       const manual = body['manual'] === true;
       if (manual) {

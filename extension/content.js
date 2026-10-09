@@ -506,6 +506,8 @@
    * it is a generation. See claimUnrecordedGeneration.
    */
   let unrecordedGeneratingSince = 0;
+  /** The native finals Fiber had reported when that generation was first seen (#1226). */
+  let finalsBeforeUnrecorded = null;
   /**
    * This document has adopted an identified chat whose durable state the app has not answered
    * for yet: neither "is one of my turns still open?" nor "which user messages do I already
@@ -1665,9 +1667,32 @@
     }
     if (!unrecordedGeneratingSince) {
       unrecordedGeneratingSince = Date.now();
+      finalsBeforeUnrecorded = new Set(knownFinals);
       return null;
     }
     return Date.now() - unrecordedGeneratingSince >= (settled ? SETTLED_REGENERATION_MS : TURN_SETTLE_MS) ? newest : null;
+  }
+
+  /**
+   * The finals that are history for a turn claimUnrecordedGeneration() opened for `questionId`,
+   * or null when the question is not on the page and every known final stays history.
+   *
+   * A claimed turn has no Send baseline, and ChatGPT can finish inside the settle window: Fiber
+   * then carries the turn's own final before its section mounts. Settling that final too left
+   * the turn open until the ten-minute watchdog (#1226). History is what Fiber had reported
+   * before the generation was first seen, plus every final drawn above the claimed question —
+   * a reloaded page can receive its first Fiber reply only after the window began.
+   */
+  function claimedHistoryFinals(questionId) {
+    const observed = CLF_DOM.turns();
+    const at = observed.findIndex(turn => turn.role === 'user' && CLF_DOM.messagesIn(turn).some(message => message.id === questionId));
+    if (at < 0) return null;
+    const history = new Set(finalsBeforeUnrecorded ?? []);
+    for (const turn of observed.slice(0, at)) {
+      const final = fiberTurnFor(turn)?.endMessageId;
+      if (final) history.add(final);
+    }
+    return history;
   }
 
   function adoptOpenTurn(open, questionId = null) {
@@ -2826,8 +2851,9 @@
       // state the resume exists to keep, since recorder.ts empties `progress`, `pageTools`
       // and the pending sightings on every turn_start.
       emit({ kind: 'turn_start', turnId });
-      // Without a witnessed Send, every final already on the page is history.
-      const finalsAtSend = submission?.baseline?.finals;
+      // A witnessed Send's baseline is exact. A claimed turn keeps its own final (#1226);
+      // any other turn without a baseline files every final already on the page as history.
+      const finalsAtSend = submission ? submission.baseline?.finals : claimedHistoryFinals(newUserMessage);
       for (const known of knownFinals) if (!finalsAtSend || finalsAtSend.has(known)) settledFinals.add(known);
 
       // The compaction binding is made here and only here: the first generation to open
@@ -3669,7 +3695,8 @@
         .map(({ id, name, size, mimeType }) => ({ id, name, size, mimeType })) : [];
       // Whole markup or none, for the same reason the wire bound above drops it.
       const renderedHtml =
-        typeof entry.renderedHtml === 'string' && entry.renderedHtml.length <= 120_000 ? entry.renderedHtml : '';
+        typeof entry.renderedHtml === 'string' && entry.renderedHtml.length <=
+          (entry.role === 'assistant' && entry.stable === true ? 256_000 : 120_000) ? entry.renderedHtml : '';
       if (!rawText && !renderedHtml && !attachments.length &&
           !(entry.role === 'assistant' && entry.rawMessageId && entry.rawMessageId === raw.endMessageId)) continue;
       const references = entry.role === 'assistant' ? readReferences(entry.references) : null;
@@ -13128,8 +13155,19 @@
         return true;
       }
       if (message.type === 'clf-resume-compaction') {
-        sendResponse({ accepted: resumePendingCompactionFromRepair(message.conversationId) });
-        return false;
+        const accepted = resumePendingCompactionFromRepair(message.conversationId);
+        if (accepted || job?.stage === 'handoff-pending' || !alive || !message.conversationId || conversationId !== message.conversationId) {
+          sendResponse({ accepted });
+          return false;
+        }
+        // A desktop Compact hands its pickup ~90 ms after opening the ticket, before this page's
+        // feed has carried the job. Declining then reloaded a healthy chat, and the handoff request
+        // met a composer that was not ready yet (VM 2026-10-09). Read the feed once, then decide.
+        void (async () => {
+          for (let wait = 0; pulling && wait < 15; wait++) await new Promise(resolve => setTimeout(resolve, 100));
+          await pullActivity();
+        })().catch(() => {}).then(() => sendResponse({ accepted: resumePendingCompactionFromRepair(message.conversationId) }));
+        return true;
       }
       // Popup diagnostics. Ids and counters only — no prose, no transcript, no page text.
       if (message.type === 'clf-page-status') {
@@ -13206,8 +13244,9 @@
         sendResponse({ safe: temporaryPlannerPage() && (location.href.includes(`cos-input=${message.id}`) || routedHelper) &&
           !generating && !CLF_DOM.generating() && pendingTools === 0 && !CLF_DOM.hasComposerAttachments() &&
           !(CLF_DOM.composer()?.textContent || '').trim() &&
-          // A remembered helper whose decision is gone may still show its own one prompt.
-          (users.length === 0 || (exact && users.length === 1 && (desktopDecision ? matchesSubmittedUser(users[0], desktopDecision.text) : !!servedPlanner))) });
+          // A remembered helper whose decision is gone may still show its own one prompt. The app
+          // inserted that prompt, so ChatGPT may store it Markdown-escaped, as its receipt allows.
+          (users.length === 0 || (exact && users.length === 1 && (desktopDecision ? matchesSubmittedBootstrap(users[0], desktopDecision.text) : !!servedPlanner))) });
         return false;
       }
       if (message.type === 'clf-render-stream') {

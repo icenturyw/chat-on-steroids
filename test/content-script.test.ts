@@ -1465,6 +1465,36 @@ describe('desktop input delivery and helper ownership', () => {
     expect(await live.runtimeMessage({ type: 'clf-close-temporary-planner', id: inputId, owner: 'input-owner' })).toEqual({ safe: false });
   });
 
+  it('retires a temporary planner whose prompt ChatGPT stored Markdown-escaped', async () => {
+    // VM 2026-10-09: the planner prompt the app inserts comes back escaped (`executor.\` + newline,
+    // `\-` list items). The close proof compared it raw, so no accepted planner tab ever closed.
+    const prompt = 'Write the next instruction.\n\n- Keep `src/main` and step_one.';
+    const escaped = 'Write the next instruction\\.\\\n\\\n\\- Keep `src/main` and step\\_one\\.';
+    const canonical = '{"action":"continue","reply":"temporary result"}';
+    live = await harness(`https://chatgpt.com/?temporary-chat=true&cos-input=${inputId}`, {
+      desktop_input: message => ({ ok: true, data: message.authorize || message.ack || message.response ? { ok: true }
+        : { input: { ...claimed({ purpose: 'decision', lifetime: 'temporary-planner' }), text: prompt } } })
+    });
+    const toggle = live.document.createElement('button'); toggle.setAttribute('aria-label', '一時チャット'); toggle.innerHTML = '<svg><use href="/sprite.svg#chat-temp-checked"></use></svg>'; Object.defineProperty(toggle, 'getClientRects', { value: () => [{}] }); live.document.body.append(toggle);
+    live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+      userTurn(live!.document, 'temp-user', escaped);
+      live!.document.querySelector('#prompt-textarea')!.textContent = '';
+      const section = assistantTurn(live!.document, 'temp-final', []);
+      prose(live!.document, section, 'temp-message', canonical);
+      const turn = (live!.window as any).CLF_DOM.turns().find((item: any) => item.id === 'temp-final');
+      live!.hook.noteGoalTurn(turn, 'completed', 'temp-final');
+    });
+    expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null })).toEqual({ ok: true });
+    const section = live.document.querySelector('[data-turn-id="temp-final"]') as HTMLElement;
+    const userSection = live.document.querySelector('[data-turn-id="temp-user"]') as HTMLElement;
+    await bindFiberTurns([{ section: userSection, turn: { conversationId: null, messages: [{ role: 'user', messageId: 'm-temp-user', rawMessageId: 'm-temp-user', rawText: escaped }] } },
+      { section, turn: { turnId: 'temp-final', conversationId: null, endMessageId: 'temp-message',
+        messages: [{ role: 'assistant', messageId: 'temp-message', rawMessageId: 'temp-message', rawText: canonical }] } }]);
+    expect(live.sent.filter(message => message.response)).toEqual([expect.objectContaining({ response: canonical })]);
+    await settle();
+    expect(await live.runtimeMessage({ type: 'clf-close-temporary-planner', id: inputId, owner: 'input-owner' })).toEqual({ safe: true });
+  });
+
   it('does not click Send when cancellation revokes the claim after preparation', async () => {
     live = await harness(`https://chatgpt.com/?cos-input=${inputId}`, {
       desktop_input: message => ({ ok: true, data: message.authorize ? { ok: false } : { input: claimed() } })
@@ -3904,6 +3934,21 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
    * as markup that stops mid-element, and the app draws the rest of the message inside the
    * unclosed box it ended in. Neither may cut; the canonical text carries the message.
    */
+  it('passes a complete large stable final through the content-script recorder', async () => {
+    live = await harness();
+    const html = `<div>${'Synthetic handoff prose. '.repeat(6_000)}END_OF_BRIEF</div>`;
+    expect(html.length).toBeGreaterThan(120_000);
+    await replyFiber([], [{
+      turnId: null, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', calls: [], activities: [],
+      messages: [{ messageId: 'long-final', rawMessageId: 'long-final', role: 'assistant', stable: true,
+        createTime: 1_780_000_000_003, rawText: 'TASK: synthetic brief', renderedHtml: html }]
+    }]);
+    await live.hook.flush();
+    await settle();
+    expect(emitted(live.sent, 'assistant_message').find(row => row.event.messageId === 'long-final')?.event)
+      .toMatchObject({ renderedHtml: html, text: 'TASK: synthetic brief' });
+  });
+
   it('drops an oversized rendered capture instead of publishing cut markup', async () => {
     live = await harness();
     const prose = 'Everything after the code block.';
@@ -3920,7 +3965,7 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
           messageId: 'assistant-over-scan-cap',
           rawMessageId: 'assistant-over-scan-cap',
           role: 'assistant',
-          stable: true,
+          stable: false,
           createTime: 1_780_000_000_001,
           rawText: prose,
           renderedHtml: `<p>${'x'.repeat(130_000)}</p>`
@@ -10172,6 +10217,86 @@ describe('a content script reloaded into a turn already in flight', () => {
     await settle();
     await live.hook.flush();
     expect(emitted(live.sent, 'turn_start')).toHaveLength(newQuestion ? 1 : 0);
+  });
+
+  /**
+   * #1226. With no Send receipt, claimUnrecordedGeneration() opens the turn once Stop has stayed
+   * for the settle window. ChatGPT can finish inside that window, so Fiber already carries the
+   * turn's own final while its section has not mounted. That final answers the claimed question;
+   * filing it as history left the turn open until the ten-minute watchdog.
+   */
+  it('ends a claimed turn on its own final that Fiber carried before the turn opened (#1226)', async () => {
+    live = await harness(
+      'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      { activity: () => activity({ activeTurnId: null, userAnchors: [] }) },
+      document => {
+        userTurn(document, 'earlier-question', 'an earlier request', { sent: false });
+        const section = assistantTurn(document, 'earlier-answer', []);
+        prose(document, section, 'earlier-final', 'Earlier answer.');
+        userTurn(document, 'claimed-question', 'run one command', { sent: false });
+        startGenerating(document, { send: false });
+      }
+    );
+    const finalOf = (id: string) => ({ messageId: id, rawMessageId: id, stable: true, rawText: 'Answer.', renderedHtml: '<p>Answer.</p>' });
+    const earlier = { section: live.document.querySelector<HTMLElement>('[data-turn-id="earlier-answer"]')!,
+      turn: { turnId: 'earlier-answer', endMessageId: 'earlier-final', messages: [finalOf('earlier-final')] } };
+    const claimed = { turnId: 'claimed-answer', endMessageId: 'claimed-final', messages: [finalOf('claimed-final')] };
+    await bindFiberTurns([earlier]);
+    live.hook.observe();
+    await settle();
+
+    // ChatGPT finishes inside the settle window: Fiber has the final, the section has not mounted.
+    await bindFiberTurns([earlier, { section: live.document.createElement('section'), turn: claimed }]);
+    live.advance(live.hook.TURN_SETTLE_MS);
+    live.hook.observe();
+    await settle();
+    await live.hook.flush();
+    expect(emitted(live.sent, 'turn_start')).toHaveLength(1);
+    expect(emitted(live.sent, 'turn_end')).toHaveLength(0);
+
+    const section = assistantTurn(live.document, 'claimed-answer', []);
+    prose(live.document, section, 'claimed-final', 'Answer.');
+    await bindFiberTurns([earlier, { section, turn: claimed }]);
+    live.hook.observe();
+    await settle();
+    await live.hook.flush();
+    const ends = emitted(live.sent, 'turn_end');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]!.event.outcome).toBe('completed');
+  });
+
+  it('keeps an earlier question\'s final from ending a claimed turn', async () => {
+    live = await harness(
+      'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      { activity: () => activity({ activeTurnId: null, userAnchors: [] }) },
+      document => {
+        userTurn(document, 'earlier-question', 'an earlier request', { sent: false });
+        const section = assistantTurn(document, 'earlier-answer', []);
+        prose(document, section, 'earlier-final', 'Earlier answer.');
+        userTurn(document, 'claimed-question', 'run one command', { sent: false });
+        startGenerating(document, { send: false });
+      }
+    );
+    // Fiber's first reply arrives only after the settle window began, as after a reload.
+    live.hook.observe();
+    await settle();
+    const section = live.document.querySelector<HTMLElement>('[data-turn-id="earlier-answer"]')!;
+    const stale = { turnId: 'earlier-answer', endMessageId: 'earlier-final',
+      messages: [{ messageId: 'earlier-final', rawMessageId: 'earlier-final', stable: true, rawText: 'Earlier answer.', renderedHtml: '<p>Earlier answer.</p>' }] };
+    await bindFiberTurns([{ section, turn: stale }]);
+    live.advance(live.hook.TURN_SETTLE_MS);
+    live.hook.observe();
+    await settle();
+    await live.hook.flush();
+    expect(emitted(live.sent, 'turn_start')).toHaveLength(1);
+
+    // #746: ChatGPT briefly hands the new answer's section the previous turn's branch.
+    const pending = assistantTurn(live.document, 'claimed-answer', []);
+    await bindFiberTurns([{ section, turn: stale }, { section: pending, turn: { ...stale, turnId: 'claimed-answer' } }]);
+    live.hook.observe();
+    await settle();
+    await live.hook.flush();
+    expect(emitted(live.sent, 'turn_end')).toHaveLength(0);
   });
 
   it('waits for durable turn identity when the first reload activity request misses the app', async () => {
@@ -17258,6 +17383,25 @@ describe('the context meter and automatic compaction', () => {
 
     expect(ticketCalls).toBe(2);
     expect(live.sent.filter((message) => message.type === 'focus_tab')).toHaveLength(2);
+  });
+
+  it('takes a desktop Compact pickup it has not yet read about without a reload', async () => {
+    // VM 2026-10-09: the app hands the pickup ~90 ms after opening the ticket, before this page's
+    // feed carried the job. The page declined, the worker reloaded the chat, and the handoff request
+    // then met a composer that was not ready yet ("Send button or message box was not ready").
+    let opened = false;
+    live = await harness(undefined, {
+      activity: () => withContext(50_000, settings({ auto: false, threshold: 200_000 }),
+        opened ? { job: { ...automaticTicket('not-attempted').job, automatic: false } } : {})
+    });
+    live.hook.injectControl();
+    await live.hook.pullActivity();
+    await settle();
+    opened = true;
+    expect(await live.runtimeMessage({
+      type: 'clf-resume-compaction',
+      conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    })).toEqual({ accepted: true });
   });
 
   it.each(['broken', 'streaming'] as const)('leaves a compaction pickup to the reload while the source answer is broken (%s)', async state => {

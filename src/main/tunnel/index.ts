@@ -23,6 +23,7 @@ import { logError, logInfo, logWarn } from '../logger.js';
 import { ago, POLL_FRESH_MS, readClientStatus, readPollHealth } from './health.js';
 import { locateBinary } from './locate.js';
 import { applySystemProxy } from './proxy.js';
+import { noteTunnelClientConnected } from './route-settle.js';
 
 export interface TunnelReport {
   state: ConnectionState;
@@ -298,6 +299,8 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     healthBase: string | null;
     health: TunnelHealth | null;
     shown: 'connected' | 'offline' | 'unknown' | null;
+    /** This process has connected once, so OpenAI has begun moving existing chats to it. */
+    routed: boolean;
   }
 
   let stopped = false;
@@ -319,6 +322,8 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     const first = run.shown !== 'connected';
     run.shown = 'connected';
     if (first) logInfo(`${tag} connected`);
+    // A reconnect after an outage is the same process, whose route never moved.
+    if (!run.routed) { run.routed = true; noteTunnelClientConnected(); }
     // Re-reported on every tick, so the UI can show how fresh the proof is.
     opts.report({
       state: 'connected',
@@ -553,7 +558,8 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       pollErrors: 0,
       healthBase: null,
       health: null,
-      shown: null
+      shown: null,
+      routed: false
     };
     current = run;
 

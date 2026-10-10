@@ -1142,7 +1142,7 @@ plain names. ChatGPT records a connector's calls under the exact name typed (cal
 
 | Delivery choice | Eligibility and behavior |
 | --- | --- |
-| Immediate / `auto` | In an exact active non-Pro turn before its first MCP call, **Send directly** claims that original turn, stops its native generation, then uses normal browser Send. **Inject now** is a separate choice, including before the first call: authored `delivery: tool` captures the exact turn, waits visibly in the existing outbox, and only enters that turn's eligible outer MCP result. It never falls back to browser Send and fails visibly if its turn ends before delivery. After the first MCP call, injection remains available; Pro (including Astra) keeps injection throughout. A new turn resets eligibility; old tool history does not count. For a proven idle chat/New Chat, elect the normal browser send. Unknown model/turn identity grants no interruption. |
+| Immediate / `auto` | In an exact active non-Pro turn, **Send directly** claims that original turn and uses ChatGPT's own Send while the turn works. ChatGPT folds the message into the turn: it ends the running part as interrupted and continues with the message, keeping the result of a call still running. Nothing is stopped first, and the running turn's model is kept. **Inject now** takes the same native path whenever the turn takes it, because text inside a tool result never reached the model (measured 2026-10-09, #1231: ChatGPT passes a command's output alone and treats any other result's text as untrusted). Tool injection remains for Pro (including Astra), for an unproven model, and for image injection: authored `delivery: tool` then captures the exact turn, waits visibly in the existing outbox, enters only that turn's eligible outer MCP result, and fails visibly if its turn ends before delivery. A new turn resets eligibility. For a proven idle chat/New Chat, elect the normal browser send. Unknown model/turn identity grants no interruption. |
 | After turn | Existing-session FIFO spends one distinct completion or confirmed failure/silence-refresh ticket per browser claim. Replays/restart cannot drain the next entry. Does not block an otherwise eligible immediate tool injection. |
 | Finish checkpoint | Waits for a successful finish-tool boundary; ordinary eligible chats can deliver after verified completion. Astra's separate after-turn opt-in remains explicit. Checkpoints inherit the current chat model. |
 | Native attachment | Browser upload/send only. A file-bearing active-chat input waits for the browser-safe boundary; it never becomes a tool-result file reference. |
@@ -1164,12 +1164,11 @@ rechecks composer and attachment nodes, crosses app authorization, then **rechec
 every await before Send**. Native stable user-message and conversation identity establish
 acceptance. Composer insertion, button disappearance and a local “sent” variable do not.
 
-Direct active-turn corrections freeze `directTurn` in the same outbox entry. The existing
-turn-start and last-tool evidence plus in-flight MCP custody decide eligibility; no separate
-tool-seen flag owns it. Recheck the exact claim before native interruption and before Send.
-Navigation, a newer question, an occupied draft or a first MCP call during preparation can
-revoke delivery. A claimed browser correction never also enters a tool result. After-turn
-entries retain their source-boundary policy and never acquire interruption authority.
+Direct active-turn corrections freeze `directTurn` in the same outbox entry. The exact turn
+start decides eligibility; earlier or running MCP calls do not revoke it. Recheck the exact claim
+before Send. Navigation, a newer question or an occupied draft during preparation can revoke
+delivery. A claimed browser correction never also enters a tool result. After-turn entries
+retain their source-boundary policy and never acquire interruption authority.
 
 Native **Thinking failed** is recognized only by its exact visible disclosure button inside the
 current assistant turn, excluding quoted Markdown, old turns and app UI. It immediately records
@@ -2484,6 +2483,13 @@ can then record a stopped page view, while a canonical final retains its stronge
 Exact app-correlated work started after Stop can withdraw the local veto only for the same active
 turn, with no pending app Stop or canonical final. Old results, foreign turns and finish-only
 calls cannot do so. Browser recovery still requires the main process's exact current authority.
+The page that ended the turn as stopped follows it again when the recorder reopens it, also when
+the live projection names no active turn but the feed holds that page's own stopped end beside
+the recorded turn; each reopening is followed once. Such a turn keeps the user's Stop: native
+idleness without a canonical final ends it as stopped again, and an app Stop for it while the
+page is idle is answered by that end instead of a click. The timeline keeps the app's Stop note
+where Stop was asked and closes the turn with a stopped line at the stopped end that is still the
+turn's last lifecycle boundary, so a reopening moves that line after the late work.
 Neither a click receipt nor a page-local stopped outcome claims provider-side cancellation.
 An already-earned MCP activity window remains visible through a stopped page observation:
 ten minutes for Pro, three otherwise. That retained display grants no input or reload while
@@ -2567,9 +2573,10 @@ tab: if the browser finds one by the time it acts (often the tab a worker wake j
 still loading or answers `clf-page-status`, it reports `repairAction=present` and never reloads it,
 which used to cut a wake off mid-send (#864). Only a silent tab is reloaded. “Recover agents” is not blanket
 permission to reopen the session list. A plain historical chat with no current work is unprotected.
-A bare open turn counts as current work for a closed tab for one hour after its start
-(`OPEN_TURN_RECOVERY_MS`); activity in the silence window counts however old the turn is. A turn
-left open by a page that went away days ago must not reopen its tab on a brief visit.
+A bare open turn counts as current work for a closed tab and for automatic compaction for one hour
+after its start (`OPEN_TURN_RECOVERY_MS`, `liveTurnIsCurrent`); activity in the silence window counts
+however old the turn is. A turn left open by a page that went away days ago must not reopen its tab
+or file a compaction on a brief visit.
 An explicit `/closed` departure with `manual: true` persists `browserRecoveryDismissedAt` in the
 existing session metadata and withdraws every unexecuted browser repair. It revokes synthetic
 silence inputs while retaining authored input, continuation tickets, exact request ownership
@@ -3760,12 +3767,16 @@ production renderer in isolated Electron with color, queue/push, theme, reset, r
 layout checks. It does not operate the installed app or a provider conversation.
 
 `renderer/plugin-refresh-reminder.ts` owns the chat-header reminder to refresh plugins
-in ChatGPT. Its X stores only the acknowledged running `state.update.current` version in
-`cos.plugins.refreshReminder.dismissedVersion`; downloading a newer version does not rearm
-it. No acknowledgement shows the reminder, including the first version with this feature.
-It survives restart until dismissed, returns for a different running version and is hidden
-in Settings. It stacks with update/extension notices and never marks an actual connector
-refresh complete or starts a browser action.
+in ChatGPT. It compares `AppState.connectorSchemas` (the declaration fingerprints the local
+MCP server publishes per surface) with the ones acknowledged in
+`cos.plugins.refreshReminder.acknowledgedSchemas`. The first schema seen per surface is a
+silent baseline; a different one shows the reminder until its X is clicked.
+`AppState.confirmedConnectorSchemas` carries, per surface, the schema ChatGPT confirmed after a
+refresh click or found already current (`confirmedPluginSchemas()`, an in-memory copy of
+`completedSchemaId` from `state/plugin-refresh.json`, kept current on every read and write); a current schema confirmed there counts as acknowledged, so
+the reminder disappears once automatic plugin refresh lands. The reminder is hidden in
+Settings, stacks with update/extension notices and never marks a refresh complete or starts a
+browser action.
 
 ### Project Files workspace
 
@@ -3980,6 +3991,18 @@ tunnel state or recovery. No raw tunnel detail or secret identifier enters the n
 `test/connection.test.ts` and `test/connection-notice.test.ts` cover grace/recovery, sleep,
 intentional retirement and notification presentation.
 
+For a few seconds after a new OpenAI tunnel-client process connects (app start, update, or a
+client the supervisor replaced), OpenAI still routes an existing chat's tool calls to the previous
+process, and a call sent then waits about 128 s for that lease (#1220; a new chat is not affected,
+and a reconnect of the same process after an outage changes nothing). `tunnel/route-settle.ts`
+holds such messages for `ROUTE_SETTLE_MS` (12 s) after each new process's first connected report:
+`/status` does not offer, and `/input/claim` refuses, an input whose page is an existing
+conversation; `wakeBrowserWork()` runs when the hold ends. `ConnectionStatus.routeSettlingUntil`
+lets the chat say the message is about to go. Measured on Windows: sent at once, 15 of 18 calls
+waited; held 12 s, 12 of 14 arrived in under 20 s (one still waited, one failed fast without reaching
+the app, back to back, so the takeover can occasionally outlast the hold). `test/tunnel-route-settle.test.ts`, the
+`tunnel-lifecycle` and `input-delivery-integration` cases cover it.
+
 The local control API (`control-api.ts`, Settings → General → For developers, off by default) serves
 `/v1/health` (which also lists the routes this build serves), `/v1/status` and the read routes
 below to a trusted local caller, typically an agent's MCP server watching the app from outside
@@ -4063,7 +4086,7 @@ supplies only `id`, `sessionId`, `text` up to 64,000 characters, and `interrupt`
 send from the composer does. The message can therefore reach ChatGPT, and a model that reads it
 can act under the capabilities the user has granted. A row sent this way is `automatic:false`,
 like one typed in the app. Worker and helper chats and chats with no ChatGPT chat yet are refused,
-and a send that would stop the answer being written needs `interrupt:true`; because the outbox
+and a send into an answer being written needs `interrupt:true`; because the outbox
 decides that itself when it admits the row, a row it marked as interrupting after the caller's check
 is withdrawn and refused. The caller's lowercase UUID is the outbox id: a repeat returns the
 existing row (200, `replayed:true`) and never reaches `enqueueInput`, and the same id with a

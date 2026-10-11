@@ -31,7 +31,8 @@ export function registerPluginTools(server: McpServer, setupProfileId: string | 
           ? parent.caller.conversationId
           : null;
       return dispatch(name, args, parent.caller.transportKey, transportConversation, parent.caller.requestId, 'plugins', () => runPluginTool(name, args), parent);
-    });
+    },
+    { surface: 'plugins' });
   if (codeMode) tools.push({ name: 'exec', title: declaration.title, description: declaration.description,
     inputSchema: toolSchemaJson(codeModeSchema) as (typeof tools)[number]['inputSchema'], annotations: declaration.annotations });
   server.server.setRequestHandler('tools/list', async () => ({ tools }));

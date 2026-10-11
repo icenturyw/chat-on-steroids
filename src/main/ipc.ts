@@ -103,7 +103,8 @@ import {
   startBridge,
   stopBridge,
   sweepStaleSwarm,
-  unpair
+  unpair,
+  followChatInBackground
 } from './bridge.js';
 import { extensionDir } from './extension-path.js';
 import { APP_VERSION, extensionDownloadUrl } from './version.js';
@@ -1409,6 +1410,18 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   handle('sessions:openChat', async (payload) => {
     const { id } = sessionIdArg.parse(payload);
     await openSessionChat(id);
+    return true;
+  });
+
+  // Selecting a chat in the app selects its tab in the Background chats window (#1249). Only
+  // the newest selection counts: a slower lookup for an earlier click must not win (#1267).
+  let followSelection = 0;
+  handle('sessions:followTab', async (payload) => {
+    const { id } = sessionIdArg.parse(payload);
+    const selection = ++followSelection;
+    const conversationId = (await getSession(id))?.conversationId;
+    if (selection !== followSelection) return true;
+    if (conversationId && /^[0-9a-z-]{8,64}$/i.test(conversationId)) followChatInBackground(conversationId);
     return true;
   });
 

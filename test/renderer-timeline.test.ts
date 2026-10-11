@@ -583,6 +583,19 @@ it.each(['compaction', 'blocked', 'worker'])('retires %s control status when lea
   expect(status.textContent).not.toBe('');
 });
 
+it('asks for the selected chat\'s background tab once per switch (#1249)', async () => {
+  const first = summary([]), second = { ...summary([]), id: '2026-09-02-test0002', title: 'Other session' };
+  const { w } = await boot([], true, [], [], { sessions: [first, second] });
+  const api = (w as any).api;
+  const followed: string[] = [];
+  api.followSessionTab = async (id: string) => { followed.push(id); return { ok: true, data: true }; };
+  const row = (id: string) => w.document.querySelector<HTMLElement>(`#sessionList [data-id="${id}"]`)!;
+  row(second.id).click();
+  row(second.id).click();
+  row(first.id).click();
+  expect(followed).toEqual([second.id, first.id]);
+});
+
 it('clears control projections on an existing-session switch and fences A to B to A responses', async () => {
   const first = summary([]), second = { ...summary([]), id: '2026-09-02-test0002', title: 'Other session' };
   const { w, append } = await boot([], true, [], [], { sessions: [first, second] });
@@ -1047,6 +1060,41 @@ it.each([false, true])('keeps retained image previews at the canonical row acros
   (w.document.querySelector('#sessionList [data-id]') as HTMLElement).click(); await settle();
   expect(w.document.querySelector('#timeline')!.textContent).not.toContain(row.text);
   expect(w.document.querySelector('#inputQueue')!.textContent).not.toContain(row.text);
+});
+
+it('says why a queued message waits: no extension, or a running tool call', async () => {
+  const asked = Date.now() - 12_000;
+  const { w, live, append } = await boot([
+    { seq: 1, time: asked - 100, source: 'extension', kind: 'turn_start', turnId: 'held-turn' },
+    { kind: 'user_message', seq: 2, origin: 2, time: asked, source: 'extension', turnId: 'held-turn', messageId: 'q-now', message: text('Run the tests') }
+  ]);
+  const api = (w as any).api;
+  const chat = await import('../src/renderer/chat.js');
+  const state = (await api.getState()).data;
+  const present = (on: boolean) => chat.chatApply({ ...state, bridge: { ...state.bridge, present: on } });
+  const queued: InputEntry = { id: 'queued-one', sessionId: summary(live.events).id, state: 'queued', owner: 'page', text: 'After the tests',
+    mode: 'auto', model: null, reasoningEffort: null, dueAt: T0, createdAt: T0, conversationId: 'chat-a' };
+  const status = () => w.document.querySelector('#inputQueue .pending-message')!.textContent ?? '';
+  live.inputs.push(queued);
+  // No extension connected: nothing can leave yet.
+  present(false); await append([]);
+  expect(status()).toContain('Waiting for the browser extension to connect');
+  expect(w.document.querySelector('#inputQueue .pending-message')!.classList.contains('is-waiting')).toBe(true);
+  // Connected, with one of this chat's tool calls running: the message waits for it (#1231).
+  api.runningTools = () => Promise.resolve({ ok: true, data: [{ title: 'Running npm test', kind: 'run', since: Date.now() - 5_000 }] });
+  present(true); await append([]); await append([]);
+  expect(status()).toContain('Waiting for the running tool call to finish');
+  // A mid-turn send does not wait for calls, so it claims no such reason.
+  live.inputs[0] = { ...queued, directTurn: { id: 'held-turn', startedAt: asked } };
+  await append([]); await append([]);
+  expect(status()).not.toContain('Waiting for the running tool call');
+  // The call ended: back to the plain clock, with Queued as its label.
+  live.inputs[0] = queued;
+  api.runningTools = () => Promise.resolve({ ok: true, data: [] });
+  await append([]); await append([]);
+  expect(status()).not.toContain('Waiting for');
+  expect(w.document.querySelector('#inputQueue .pending-message-status')!.getAttribute('aria-label')).toBe('Queued');
+  expect(w.document.querySelector('#inputQueue .pending-message')!.classList.contains('is-waiting')).toBe(false);
 });
 
 it.each([false, true])('hands a delivered bubble to exact native history without a blank or duplicate (historyFirst=%s)', async historyFirst => {

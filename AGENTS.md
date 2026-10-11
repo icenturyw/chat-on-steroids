@@ -579,6 +579,11 @@ QuickJS runs in a disposable Node Worker with no ambient Node, filesystem or net
 Children reuse the same registrar, validation, handler and dispatcher, inherit exact caller proof
 and recheck live permissions/roots. Each child records fresh evidence; only the outer response
 owns input, agent inbox and automatic terminal-result delivery. Finish signals remain direct.
+A script that calls `tools.<name>` for a name this surface does not offer (a feature check such
+as `typeof tools.x` does not count) gets one extra `UNKNOWN_TOOL_NAMES` text item at the end of
+its result. It names the connector that owns the tool and, when two connectors share a Secure
+Tunnel ID, says that ChatGPT can then send a script to the wrong connector (#1287). It changes
+neither `isError` nor what the script ran.
 
 Only explicitly emitted text/images enter the result, except Windows Desktop's `sky.get_window_state`
 adapter automatically forwards its native MCP image blocks. Its returned value contains only
@@ -928,7 +933,10 @@ Every successful launch also returns a session id when it finishes immediately. 
 structured results keep `session_id` for running work and use `completed_session_id` for
 finished work, so existing polling loops still stop. Either id is the `write_stdin` input.
 On every OS, structured `output_replayed` marks a retained reread and `benign_exit` marks a
-proven expected non-zero result; raw exit codes remain intact.
+proven expected non-zero result; raw exit codes remain intact. ChatGPT gives the model the
+structured result rather than the text, so `exec_command`'s advisory `Note:` lines (batch
+exit codes, benign exits, recovery hints, a still-running identical command) are also carried
+in structured `supplemental_context`; delivery appends its own app context there after them.
 nonempty input to a completed process is refused and never restarts work. The same manager
 retains the latest 64 completed results for this app lifetime, with 256 KiB of raw head/tail
 output each (and delimiter-free batch presentation). Completed rereads have no unread debt,
@@ -2329,6 +2337,12 @@ signed in to another account. An extension whose `/status` body says `canReveal:
 the chat in `reveals`, under the same holding rule, and focuses its tab or opens it (restoring a
 minimized window). When no such extension is connected, or none takes it within 4 s, the request
 is withdrawn and the app opens the URL through the OS as before.
+
+Selecting a chat in the app (`sessions:followTab`, preload `followSessionTab`) with Background
+chats on hands its conversation to the same extensions as `follow`: only the newest selection,
+only to a browser that already has the chat open, and it lapses after 10 s. The extension makes
+that tab the selected one in its Background chats window. That never focuses the window, opens a
+tab or touches the user's own windows (#1249).
 
 Core's `save_image` (created only with the create-files permission) saves the original file of an
 image ChatGPT generated in the calling chat (#889); the recording keeps only a preview. The call's
@@ -3962,10 +3976,18 @@ Refused calls classify the current admission fact: a name absent from every reta
 unknown/stale/wrong-connector; an exact exposure conflict or schema-limit issue is not exposed;
 only a uniquely known disabled integration/tool is disabled. Sign-in, authentication in progress,
 server error, residual unavailability and shutdown keep their separate diagnoses. Connector refresh
-cannot repair those states. Retained declarations and exposure issues explain refusal only; they
-never route a call, select a conflicting owner, start sign-in or reconnect. Every pre-dispatch
-refusal records `tool_rejected` and says the requested tool call was not dispatched. An admitted
-upstream error remains `tool_execution_error`; its arbitrary text cannot redefine admission.
+cannot repair those states. When that absent name is an exact member of `SURFACES.core.tools` and
+Plugins does not also declare it (shared `exec` stays generic), the same `UNKNOWN_TOOL` refusal
+names this installation's Core connector from `surfaceDefinition('core').connectorName` and tells
+the caller to discover or select that connector. Static membership identifies ownership only: the
+text does not report Core as enabled or connected, and it does not treat an earlier launch as
+already run. Case-mismatched names and every other unclaimed name keep the generic unknown-tool
+wording. A retained external declaration, including a tool literally named `exec_command`, still
+uses its conflict, disabled, authentication, startup or shutdown diagnosis and is not redirected.
+Retained declarations and exposure issues explain refusal only; they never route a call, select a
+conflicting owner, start sign-in or reconnect. Every pre-dispatch refusal records `tool_rejected`
+and says the requested tool call was not dispatched. An admitted upstream error remains
+`tool_execution_error`; its arbitrary text cannot redefine admission.
 Refresh observations allow the registrar's one additional code-mode tool. Legacy 64-tool
 snapshots (plus optional code mode) can enroll only as an exact declaration subset of the
 current Plugins publication; refresh completion still requires the complete current catalog.

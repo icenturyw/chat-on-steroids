@@ -221,6 +221,13 @@ it('outlines a running turn in ChatGPT\'s order: sentences, this app\'s calls, r
   expect(JSON.stringify(trace)).not.toContain('PRIVATE_HIDDEN_GROUP');
   expect(JSON.stringify(trace)).not.toContain('NEVER_COPY_TOOL_ARGS');
 });
+it('names the user message that opened each turn, so its outline is filed under the right one (#1301)', async () => {
+  const f = fixture();
+  expect((await f.ask()).turns[0].question).toBe(USER);
+  // A turn whose first item is not a user message names none.
+  f.entry.turn.items.shift();
+  expect((await f.ask()).turns[0].question).toBeUndefined();
+});
 it('says what a running turn is doing with the open thought ChatGPT shows, and nothing once it ends', async () => {
   const f = fixture();
   // Observed 2026-10-08: the group's activeReasoning is the status line until the round closes.
@@ -1560,4 +1567,32 @@ it('reads a translated Extra High lane as xhigh, as the English label does', asy
   expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-6-thinking', reasoningEffort: 'xhigh' });
   lanes[2]!.labels.effort = 'Extra High';
   expect((await f.ask('clf-picker-ask')).picker.choices[2].effort).toBe('xhigh');
+});
+
+// Measured live 2026-10-11 (VM 141): ChatGPT's shell turns reach the app with stripped request
+// metadata, so app sightings must come from the shell's own mapping, or no connector is ever proven.
+it('reports app sightings for shell turns from the native mapping', async () => {
+  const f = fixture();
+  const { mapping, resultId } = pairedShellCall(f);
+  // ChatGPT stamps the result with its invocation's request id (live data); OTHER is the fixture's.
+  mapping[resultId].message.metadata.request_id = OTHER;
+  mapping[resultId].message.metadata.invoked_resource.resource_uri = '/asdk_app_x1/link_x/read';
+  const turn = (await f.ask()).turns[0];
+  expect(turn.sightings).toEqual([{ requestId: OTHER, appId: 'asdk_app_x1', linkId: 'link_x', appName: 'Chat On Steroids Core' }]);
+  expect(JSON.stringify(turn)).not.toContain('PRIVATE_TOOL_RESULT');
+});
+
+// Measured live 2026-10-11: in a new chat the result row is in ChatGPT's mapping but not among the
+// turn's message ids, so it is found by this turn's own request id instead.
+it('reports an app sighting for a shell result outside the turn\'s message ids, matched by this turn\'s request id', async () => {
+  const f = fixture();
+  const { mapping, resultId } = pairedShellCall(f);
+  mapping[resultId].message.metadata.request_id = OTHER;
+  mapping[resultId].message.metadata.invoked_resource.resource_uri = '/asdk_app_x1/link_x/read';
+  f.entry.turn.messageIds = f.entry.turn.messageIds.map((id: string) => id === resultId ? CALL : id);
+  mapping['99999999-0000-4000-8000-000000000000'] = { id: '99999999-0000-4000-8000-000000000000', message: { id: '99999999-0000-4000-8000-000000000000',
+    author: { role: 'tool', name: 'api_tool.call_tool' }, recipient: 'all',
+    metadata: { request_id: 'another-turns-request', invoked_resource: { app_name: 'Gmail', resource_uri: '/asdk_app_gmail/link_g/search' } } } };
+  const turn = (await f.ask()).turns[0];
+  expect(turn.sightings).toEqual([{ requestId: OTHER, appId: 'asdk_app_x1', linkId: 'link_x', appName: 'Chat On Steroids Core' }]);
 });

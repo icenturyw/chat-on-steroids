@@ -1,5 +1,6 @@
 import { initBrowserSetup } from './setup-browser.js';
 import { currentLanguage, ui, uiText, t, initLanguage, onLanguageChange } from './i18n.js';
+import { chatgptNameLine } from './connector-name.js';
 import { CONNECTOR_SUFFIX_MAX, CONNECTOR_SUFFIX_PATTERN } from '../shared/connector-names.js';
 import { displayLocalServer } from './local-url.js';
 import { paintPluginRefreshReminder } from './plugin-refresh-reminder.js';
@@ -691,6 +692,7 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?:
       planBackend: $<HTMLSelectElement>('planBackend').value as 'chatgpt' | 'api',
       finishLeadMinutes: Number($<HTMLSelectElement>('finishLeadMinutes').value),
       backgroundChats: $<HTMLInputElement>('backgroundChats').checked,
+      backgroundPlacement: $<HTMLSelectElement>('backgroundPlacement').value === 'group' ? 'group' : 'window',
       browserBridgePort: (selectedBridgePort === 'auto' ? 'auto' : Number(selectedBridgePort)) as BrowserBridgePort,
       autoContinue: $<HTMLInputElement>('autoContinue').checked,
       browserOnly: $<HTMLInputElement>('browserOnly').checked,
@@ -1593,6 +1595,7 @@ function apply(next: AppState): void {
   applyValue($<HTMLSelectElement>('finishLeadMinutes'), String(config.ui.finishLeadMinutes ?? 5), String(previousState?.config.ui.finishLeadMinutes ?? 5));
   $<HTMLSelectElement>('finishLeadMinutes').disabled = config.ui.finishTool !== true;
   applyChecked($<HTMLInputElement>('backgroundChats'), config.ui.backgroundChats === true, previousState?.config.ui.backgroundChats);
+  applyValue($<HTMLSelectElement>('backgroundPlacement'), config.ui.backgroundPlacement ?? 'window', previousState?.config.ui.backgroundPlacement ?? 'window');
   const bridgePortControl = $<HTMLSelectElement>('browserBridgePort');
   applyValue(bridgePortControl, String(config.ui.browserBridgePort ?? 'auto'), String(previousState?.config.ui.browserBridgePort ?? 'auto'));
   bridgePortControl.disabled = next.bridge.portOverridden === true;
@@ -1749,7 +1752,7 @@ function apply(next: AppState): void {
               ? "ChatGPT ran a tool {0}, but {1} has never been called — create it in ChatGPT to use it."
               : "ChatGPT ran a tool {0}, but {1} have never been called — create them in ChatGPT to use them.",
             [ago(ranAt), new Intl.ListFormat(currentLanguage(), { type: 'conjunction' })
-              .format(unverified.map((surface) => `“${surface.connectorName}”`))])
+              .format(unverified.map((surface) => `“${surface.chatgptName || surface.connectorName}”`))])
           : t("ChatGPT ran a tool {0} — the whole chain works.", [ago(ranAt)]));
 
   const cards = $('connectorCards');
@@ -1902,6 +1905,8 @@ function connectorCards(next: AppState): HTMLElement[] {
     );
     head.append(el('h4', '', surface.connectorName), badges);
     card.append(head, el('p', 'hint', () => t(surface.cardSummary)));
+    // A connector renamed in ChatGPT keeps working; say what ChatGPT calls it now.
+    if (chatgptNameLine(surface)) card.append(el('p', 'hint', () => chatgptNameLine(surface) ?? ''));
 
     if (!surface.available) {
       card.append(el('p', 'hint', () => t(surface.detail)));

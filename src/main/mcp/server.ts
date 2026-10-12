@@ -39,7 +39,7 @@ import {
 import { getConfig } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 import { buildServer, resetToolClock, type ToolContext } from './tools.js';
-import { SURFACE_IDS, surfaceDefinition, type SurfaceId } from './surfaces.js';
+import { SURFACE_IDS, configuredConnectorName, type SurfaceId } from './surfaces.js';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
@@ -411,7 +411,7 @@ export async function startMcpServer(
     if (prmRoute) {
       if (!checkHost(req, res)) return;
       if (!checkOrigin(req, res)) return;
-      const body = protectedResourceMetadata(prmRoute.url, surfaceDefinition(prmRoute.id).connectorName);
+      const body = protectedResourceMetadata(prmRoute.url, configuredConnectorName(prmRoute.id));
       res.writeHead(200, {
         'content-type': 'application/json',
         'cache-control': 'no-store',

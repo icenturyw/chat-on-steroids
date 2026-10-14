@@ -274,13 +274,17 @@ export function forgetExposedSurface(): void {
 
 export async function startMcpServer(
   getContext: () => ToolContext,
-  options: {
+  supplied: {
     port?: number;
     publicHostname?: string;
     surfaceTokens?: Partial<Record<SurfaceId, string>>;
     onRequest?: () => void;
-  } = {}
+  } | Partial<Record<SurfaceId, string>> = {}
 ): Promise<McpEndpoint> {
+  // Accept upstream's direct token map as well as the custom fixed-tunnel options.
+  const options = ('core' in supplied || 'desktop' in supplied || 'plugins' in supplied)
+    ? { surfaceTokens: supplied as Partial<Record<SurfaceId, string>> }
+    : supplied as { port?: number; publicHostname?: string; surfaceTokens?: Partial<Record<SurfaceId, string>>; onRequest?: () => void };
   // A bearer token in the path is what authorises callers. The connection layer normally
   // supplies one stable token per surface from OS secure storage so a named-tunnel URL remains
   // usable across restarts. If secure storage is unavailable, fall back to a per-run token.
@@ -295,7 +299,7 @@ export async function startMcpServer(
   // Desktop" and "give me everything" the same act.
   const surfacePaths = SURFACE_IDS.map((id) => ({
     id,
-    basePath: `/mcp/${id}/${options.surfaceTokens?.[id] ?? randomBytes(32).toString('base64url')}`
+    basePath: `/mcp/${id}/${options.surfaceTokens?.[id] && /^[A-Za-z0-9_-]{43}$/.test(options.surfaceTokens[id]!) ? options.surfaceTokens[id] : randomBytes(32).toString('base64url')}`
   }));
 
   // ChatGPT can keep a cached tools/list snapshot for the lifetime of a connector

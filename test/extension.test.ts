@@ -927,6 +927,26 @@ describe('popup-only ChatGPT session transfer', () => {
     expect(requests).toHaveLength(1);
   });
 
+  // Without access to chatgpt.com no content script runs: the extension pairs and takes work, but
+  // nothing on the page ever answers. Firefox shows this after a revoked permission, Chrome with
+  // site access "On click"; measured on the VM 2026-10-14, a new chat then sat unclaimed.
+  it.each([[true, true], [false, false], [undefined, undefined]] as const)('reports whether it may access ChatGPT (%s)', async (granted, reported) => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetch = vi.fn(async (input: string, init?: Record<string, unknown>) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/status') { if (init?.body) bodies.push(JSON.parse(String(init.body))); return response(200, { ok: true, repairs: [] }); }
+      return response(404, {});
+    });
+    const contains = vi.fn(async (_query: { origins?: string[] }) => granted as boolean);
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(), fetch,
+      ...(granted === undefined ? {} : { permissions: { contains } }) });
+    await worker.fireAlarm();
+    expect(bodies.length).toBeGreaterThan(0);
+    expect(bodies.at(-1)!.chatgptAccess).toBe(reported);
+    if (granted !== undefined) expect(contains).toHaveBeenCalledWith({ origins: ['https://chatgpt.com/*'] });
+  });
+
   it('reports the browser presence with ChatGPT’s answer, asking once per page load', async () => {
     const presence: unknown[] = [];
     const fetch = vi.fn(async (input: string, init?: Record<string, unknown>) => {
@@ -5997,5 +6017,49 @@ describe('this install\'s connector names', () => {
     names = { core: 'Chat On Steroids Core', desktop: 'Chat On Steroids Desktop', plugins: 'Chat On Steroids Plugins' };
     await worker.fireAlarm();
     expect((await worker.send({ type: 'status' }) as any).connectorNames).toEqual(names);
+  });
+});
+
+describe('archiving retired worker chats (#1460)', () => {
+  const chat = 'aaaaaaaa-1111-4222-8333-444444444444';
+  function archiveWorker(outcome: unknown) {
+    const results: unknown[] = [];
+    let next: string | null = chat;
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(),
+      fetch: async (input, init = {}) => {
+        const route = new URL(input).pathname;
+        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (route === '/worker-archive/next') { const id = next; next = null; return response(200, { conversationId: id }); }
+        if (route === '/worker-archive/result') { results.push(JSON.parse(String(init.body))); return response(200, { ok: true }); }
+        return response(200, {});
+      },
+      tabsSendMessage: async (_tabId, message) => message.type === 'clf-archive-chat' ? outcome : { ok: true }
+    });
+    return { worker, results };
+  }
+
+  it('archives the next chat from a registered ChatGPT page and reports what it said', async () => {
+    const { worker, results } = archiveWorker({ outcome: 'archived' });
+    await worker.createTab({ id: 1, url: 'https://chatgpt.com/' });
+    await worker.registerTab(1);
+    await worker.fireAlarm();
+    expect(worker.tabsSendMessage).toHaveBeenCalledWith(1, { type: 'clf-archive-chat', conversationId: chat }, expect.objectContaining({ documentId: expect.any(String) }));
+    expect(results).toEqual([{ conversationId: chat, outcome: 'archived' }]);
+  });
+
+  it('defers when no ChatGPT page of this extension is open', async () => {
+    const { worker, results } = archiveWorker({ outcome: 'archived' });
+    await worker.fireAlarm();
+    expect(worker.tabsSendMessage).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: 'clf-archive-chat' }), expect.anything());
+    expect(results).toEqual([{ conversationId: chat, outcome: 'deferred' }]);
+  });
+
+  it('reports a failure the page could not explain as failed', async () => {
+    const { worker, results } = archiveWorker({ outcome: 'deleted' });
+    await worker.createTab({ id: 1, url: 'https://chatgpt.com/' });
+    await worker.registerTab(1);
+    await worker.fireAlarm();
+    expect(results).toEqual([{ conversationId: chat, outcome: 'failed' }]);
   });
 });

@@ -32,7 +32,8 @@ const mocks = vi.hoisted(() => {
     },
     ui: { privacyScreenshots: false },
     sessions: { record: false },
-    multiAgent: { enabled: false }
+    multiAgent: { enabled: false },
+    mcp: { instructions: '', persistentUrls: false }
   };
   return {
     caps,
@@ -105,6 +106,12 @@ vi.mock('../src/main/mcp/server.js', () => ({
 }));
 
 vi.mock('../src/main/mcp/tools.js', () => ({ lastToolCallAt: () => null }));
+const paths = vi.hoisted(() => ({ kept: {} as Record<string, string>, remembered: [] as unknown[] }));
+vi.mock('../src/main/mcp/persistent-paths.js', () => ({
+  loadSurfaceTokens: vi.fn(async () => paths.kept),
+  rememberSurfaceTokens: vi.fn(async (urls: unknown) => { paths.remembered.push(urls); return true; }),
+  forgetSurfaceTokens: vi.fn(async () => undefined)
+}));
 vi.mock('../src/main/secrets.js', () => ({
   getSecret: vi.fn(async (key: string) => {
     if (key === 'mcpCorePathToken' || key === 'mcpDesktopPathToken' || key === 'mcpPluginsPathToken') {
@@ -221,7 +228,10 @@ describe('connection surface state', () => {
     });
   });
 
-  it('persists one MCP path token per surface and reuses them after a module restart', async () => {
+  it('preserves named Cloudflare MCP path tokens across restarts for existing plugin URLs', async () => {
+    mocks.config.tunnel.cloudflareMode = 'named';
+    mocks.config.tunnel.cloudflarePublicUrl = 'https://mcp.example.com/';
+    mocks.secrets.cloudflareTunnelToken = 'named-token-secret';
     const firstConnection = await import('../src/main/connection.js');
     await firstConnection.connect();
     const firstTokens = { ...mocks.surfaceTokens } as Record<string, string>;
@@ -667,6 +677,114 @@ describe('connection surface state', () => {
     expect(refresh.pluginRefreshPublications()).toEqual([]);
   });
 
+  it('describes configured optional connectors before connecting and follows capability changes while offline', async () => {
+    mocks.config.tunnel.kind = 'openai';
+    mocks.config.tunnel.tunnelId = 'tunnel_core';
+    mocks.config.tunnel.desktopTunnelId = 'tunnel_desktop';
+    mocks.config.tunnel.pluginsTunnelId = 'tunnel_plugins';
+    mocks.caps.screen = true;
+    const { PluginManager } = await import('../src/main/plugins/manager.js');
+    const catalog = vi.spyOn(PluginManager.prototype, 'tools').mockReturnValue([
+      { name: 'offline_catalog_tool', description: 'Retained test catalog', inputSchema: { type: 'object' } }
+    ]);
+    try {
+      const connection = await import('../src/main/connection.js');
+      const before = connection.getStatus();
+      expect(before.state).toBe('disconnected');
+      expect(before.surfaces.map(surface => surface.id)).toEqual(['core', 'desktop', 'plugins']);
+      expect(before.surfaces.find(surface => surface.id === 'desktop')).toMatchObject({ available: true, state: 'off', localUrl: null });
+      expect(before.surfaces.find(surface => surface.id === 'desktop')!.tools.length).toBeGreaterThan(0);
+      expect(before.surfaces.find(surface => surface.id === 'plugins')).toMatchObject({ available: true, state: 'off', tools: ['offline_catalog_tool'] });
+      mocks.caps.screen = false;
+      catalog.mockReturnValue([]);
+      const after = connection.getStatus();
+      expect(after.surfaces.find(surface => surface.id === 'desktop')).toMatchObject({ available: false, tools: [] });
+      expect(after.surfaces.find(surface => surface.id === 'plugins')!.tools).toEqual([]);
+      expect(mocks.starts).toBe(0);
+      expect(mocks.endpointStartReached).not.toHaveBeenCalled();
+    } finally { catalog.mockRestore(); }
+  });
+
+  it('refuses revoked connection authority when its lifecycle queue begins', async () => {
+    const connection = await import('../src/main/connection.js');
+    let current = true;
+    const pending = connection.connect(() => current);
+    current = false; await pending;
+    expect(mocks.endpointStartReached).not.toHaveBeenCalled(); expect(mocks.starts).toBe(0);
+    expect(connection.getStatus().state).toBe('disconnected');
+  });
+
+  it.each(['endpoint', 'secret'])('retires startup resources when connection authority changes during %s startup', async boundary => {
+    const connection = await import('../src/main/connection.js');
+    let current = true, release!: () => void, reached!: () => void;
+    const started = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    if (boundary === 'endpoint') { mocks.endpointStartGate = gate; mocks.endpointStartReached.mockImplementationOnce(reached); }
+    else { mocks.secretGate = gate; mocks.secretReached.mockImplementationOnce(reached); }
+    const pending = connection.connect(() => current); await started;
+    current = false; release(); await pending;
+    expect(mocks.starts).toBe(0); expect(mocks.endpointStop).toHaveBeenCalledTimes(1);
+    expect(connection.getStatus()).toMatchObject({ state: 'disconnected', localUrl: null, publicUrl: null });
+  });
+
+  it('keeps connected health reports owned by the connection after startup authority ends', async () => {
+    const connection = await import('../src/main/connection.js');
+    let current = true;
+    await connection.connect(() => current);
+    current = false;
+    mocks.report?.({ state: 'offline', detail: 'A later connection health report' });
+    expect(connection.getStatus().state).toBe('offline');
+    await connection.disconnect();
+  });
+
+  it('does not start another connection when authority is revoked during the previous drain', async () => {
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+    mocks.report?.({ state: 'auth-failed', detail: 'Retry needs a new connection' });
+    let current = true, release!: () => void, reached!: () => void;
+    const started = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    mocks.endpointStop.mockImplementationOnce(async () => { reached(); await gate; });
+    const pending = connection.connect(() => current); await started;
+    current = false; release(); await pending;
+    expect(mocks.endpointStartReached).toHaveBeenCalledTimes(1); expect(mocks.starts).toBe(1);
+    expect(connection.getStatus().state).toBe('disconnected');
+  });
+
+  it('stops a late tunnel handle and refuses its report after startup authority is revoked', async () => {
+    const connection = await import('../src/main/connection.js');
+    let current = true, release!: () => void, reached!: () => void;
+    const started = new Promise<void>(resolve => { reached = resolve; });
+    mocks.tunnelStartGate = new Promise<void>(resolve => { release = resolve; });
+    mocks.tunnelStartReached.mockImplementationOnce(reached);
+    const pending = connection.connect(() => current); await started;
+    current = false; release(); await pending;
+    expect(mocks.tunnelStop).toHaveBeenCalledTimes(1);
+    expect(connection.getStatus().state).toBe('disconnected');
+  });
+
+  it('refuses a late optional tunnel report and retires both handles after startup authority changes', async () => {
+    mocks.config.tunnel.kind = 'openai';
+    mocks.config.tunnel.tunnelId = 'tunnel_core';
+    mocks.config.tunnel.pluginsTunnelId = 'tunnel_plugins';
+    const connection = await import('../src/main/connection.js');
+    let current = true, release!: () => void, reached!: () => void;
+    const started = new Promise<void>(resolve => { reached = resolve; });
+    mocks.optionalStartGate = new Promise<void>(resolve => { release = resolve; });
+    mocks.optionalStartReached.mockImplementationOnce(reached);
+    const lateReports: string[] = [];
+    const unsubscribe = connection.onStatusChange(status => {
+      if (!current && status.surfaces.find(surface => surface.id === 'plugins')?.state === 'live') lateReports.push('live');
+    });
+    try {
+      const pending = connection.connect(() => current); await started;
+      current = false; release(); await pending;
+      expect(lateReports).toEqual([]);
+      expect(mocks.tunnelStop).toHaveBeenCalledTimes(2);
+      expect(connection.getStatus().state).toBe('disconnected');
+    } finally { unsubscribe(); }
+  });
+
   it('drops the previous tunnel state and URL from connector cards after disconnect', async () => {
     const connection = await import('../src/main/connection.js');
 
@@ -1054,5 +1172,31 @@ describe('connection surface state', () => {
     await desktop.connect();
     expect(desktop.getStatus().state).toBe('connected');
     expect(mocks.starts).toBe(2);
+  });
+});
+
+// #924 / #1401: with the option on, a restart serves the same connector URLs.
+describe('persistent connector URLs', () => {
+  it('starts on the kept tokens and remembers the running ones only when the option is on', async () => {
+    // A fresh connection module: earlier tests in this file end in a final shutdown.
+    vi.resetModules();
+    const connection = await import('../src/main/connection.js');
+    const { startMcpServer } = await import('../src/main/mcp/server.js');
+    const start = vi.mocked(startMcpServer);
+    paths.kept = { core: 'k'.repeat(43) }; paths.remembered.length = 0;
+    mocks.config.mcp.persistentUrls = true;
+    await connection.connect();
+    expect(start.mock.calls.at(-1)![1]).toMatchObject({
+      port: 28_767, surfaceTokens: { core: 'k'.repeat(43) }
+    });
+    expect(paths.remembered.at(-1)).toMatchObject({ core: 'http://127.0.0.1:28767/mcp/core/core-token' });
+    await connection.disconnect();
+    mocks.config.mcp.persistentUrls = false; paths.remembered.length = 0;
+    await connection.connect();
+    expect(start.mock.calls.at(-1)![1]).toMatchObject({
+      port: 28_767, surfaceTokens: {}
+    });
+    expect(paths.remembered).toEqual([]);
+    await connection.disconnect();
   });
 });

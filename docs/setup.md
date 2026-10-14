@@ -95,11 +95,25 @@ With a second switch, **Allow actions: let local agents send messages, start new
 off whenever the API is off, and left off when you turn the API back on), it also serves:
 
 - `POST /v1/inputs` with `{ "id": "<new lowercase UUID>", "sessionId": "...", "text": "..." }` (up to 64,000 characters) sends a message to an existing chat through the same outbox as the composer. Without `sessionId` it starts a **new chat** with that message, like the composer's New chat; the new chat's id is the message `id` (also `input.sessionId` in the answer), so it can be followed right away with `GET /v1/sessions/{id}/events`. A new chat may name a `projectId` to start in that project (404 `project_not_found` for an unknown one); a project together with a `sessionId` is refused. Like the composer it connects CoS and opens the chat in your browser. It answers 202 once the message is stored; whether ChatGPT received it is read later from `GET /v1/inputs` (`delivery`: `sent`, `not_sent`, `unconfirmed` or `pending`). Repeating an id returns the same message and does not send it again, but the outbox keeps only the last 50 finished messages (fewer when they are very large), so use a new UUID for each message. After a timeout, read `GET /v1/inputs` before sending again. A chat takes one message at a time, and if ChatGPT is writing an answer that the send would stop, the request is refused unless it also says `"interrupt": true`. Worker and helper chats cannot be sent to;
+- `POST /v1/sessions/{id}/stop` with `{ "turnId": "..." }` (the `activeTurnId` from `GET /v1/sessions/{id}?live=1`) stops the answer the chat is writing, exactly like the app's Stop button, which also switches Goal or Loop off for that chat. It answers `202` with the chat's `live` state; the answer has ended once its `turn_end` event is recorded. It answers `409 turn_not_running` when that answer is no longer running, so a late request never stops a newer one, and it refuses a worker or helper chat.
 - `POST /v1/inputs/{id}/cancel` withdraws a message that has not been handed to ChatGPT. It refuses a message that was delivered, one whose Send was already authorized (it may be in ChatGPT), the first message of a new chat, a message paired with another, and a message of a worker or helper chat.
 
 **Anyone who can read your user data folder and has this switch on can write into your chats, and
 a model that reads those messages can act under the permissions you have granted.**
 With the switch off, these routes all answer 403 and nothing changes.
+
+Local agents can control broker workers when Allow actions and workers are both on.
+Save a lowercase UUID as `ownerId` and reuse it across calls and app restarts.
+`GET /v1/workers/{ownerId}` lists that caller's workers.
+`GET /v1/workers/{ownerId}/reports` returns unread reports.
+Send POST requests to `/v1/workers/{ownerId}/spawn` to start workers,
+`/v1/workers/{ownerId}/message` to send them messages, and
+`/v1/workers/{ownerId}/ack` to acknowledge report IDs.
+Reports repeat until the caller acknowledges them. All five worker routes return 403
+when either switch is off. The other read routes remain available.
+The [worker API contract](../AGENTS.md#18-desktop-workspace-plugins-connection-and-native-control)
+lists the request fields and limits.
+For a CLI and agent skill, see [cos-bridge](https://github.com/abdulsalamgs/cos-bridge).
 
 Requests need `Authorization: Bearer <token>`. Any request with a browser `Origin` is refused.
 A read that waits on something the app cannot answer within 15 seconds gets `504 timeout`, and `/v1/health` keeps answering (within the same rate limit), so a caller can tell an app that is waiting from one that is not running. An app frozen outright answers nothing.

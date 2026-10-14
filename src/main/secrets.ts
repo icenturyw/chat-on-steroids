@@ -87,7 +87,8 @@ export type SecretKey =
   | 'mcpDesktopPathToken'
   | 'mcpPluginsPathToken'
   | `plugin:${string}`
-  | `setup:${string}`;
+  | `setup:${string}`
+  | `mcp:path:${string}`;
 
 export function initSecretsPath(userDataDir: string): void {
   secretsPath = path.join(userDataDir, FILE_NAME);

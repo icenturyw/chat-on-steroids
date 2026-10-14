@@ -1,4 +1,5 @@
-import type { ReasoningEffort } from './session.js';
+import type { ReasoningEffort, RecordingStorageLimitGiB } from './session.js';
+import type { PluginRefreshStatus } from './plugin-refresh.js';
 import { WINDOWS_COMPUTER_READ_METHODS, WINDOWS_COMPUTER_INPUT_METHODS } from './windows-computer.js';
 import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from './browser-control.js';
 import type { CommandAllowlistSettings } from './command-allowlist.js';
@@ -151,6 +152,8 @@ export interface UiPrefs {
   browserBridgePort?: import('./browser-bridge.js').BrowserBridgePort;
   /** Opt-in browser automation for changed connector tool schemas. */
   autoRefreshPlugins?: boolean;
+  /** True once the person answered the one-time offer to turn automatic plugin refresh on. */
+  autoRefreshPluginsAsked?: boolean;
   /** Opt-in deterministic metadata routing for managed Skills on ordinary user input. */
   autoSelectSkills?: boolean;
   /** Actual app-owned tabs to retain; active work and drafts stay protected. Omitted uses workers + 2. */
@@ -180,6 +183,14 @@ export interface UiPrefs {
   minimizeToTray: boolean;
   autoConnect: boolean;
   startAtLogin?: boolean;
+  /** A notification when a chat finishes a turn while the window is in the background. Missing means on. */
+  turnNotifications?: boolean;
+  /** Codex's "Follow-up behavior": a message typed during a turn joins it (`steer`, the default) or waits for its end (`queue`). */
+  followUp?: 'steer' | 'queue';
+  /** Codex's "Enter key behavior": Enter sends (missing or true), or only Cmd/Ctrl+Enter sends (false). */
+  enterSends?: boolean;
+  /** Keep the computer from sleeping while a chat is working (Codex: Prevent sleep while running). Missing means on. */
+  keepAwake?: boolean;
   /** Default screenshots to the active window instead of the whole primary monitor. */
   privacyScreenshots: boolean;
   /** Browser for app-originated launches; connected source tabs retain placement ownership. */
@@ -202,6 +213,8 @@ export interface SessionSettings {
   advisoryTokens: number;
   /** Estimated tokens at which that suggestion becomes urgent. */
   limitTokens: number;
+  /** Size of the store for recorded images and long texts, in GiB (#1406). Missing means 2. */
+  storageLimitGiB?: RecordingStorageLimitGiB;
 }
 
 /**
@@ -356,6 +369,11 @@ export interface MultiAgentSettings {
    */
   waitForSubAgents?: boolean;
   /**
+   * Opt into an isolated Git worktree and branch for each newly spawned worker.
+   * Defaults to Off. Existing managed workers keep their exact workspace if toggled Off.
+   */
+  autoWorktrees?: boolean;
+  /**
    * Reclaim only terminal processes owned by an exactly identified worker that has remained
    * sleeping beyond the runtime-retention threshold. Off by default; durable worker/chat
    * identity and history are never reclaimed by this switch.
@@ -374,7 +392,7 @@ export interface ControlApiSettings {
   /** Serve the loopback API and write its token to userData. Off unless the user turns it on. */
   enabled: boolean;
   /**
-   * Also let a caller with the token send and cancel messages through the outbox. Off unless the
+   * Also let a caller with the token send messages, start new chats and cancel messages through the outbox. Off unless the
    * user turns it on, and never on while `enabled` is off: turning the API off revokes it.
    */
   allowActions: boolean;
@@ -746,8 +764,16 @@ export interface AppState {
    * local contract only; they are not evidence that ChatGPT has refreshed its cached tools.
    */
   connectorSchemas: Partial<Record<SurfaceId, string>>;
+  /** Provider declaration evidence scoped to the current local schema. */
+  connectorRefresh?: Partial<Record<SurfaceId, PluginRefreshStatus>>;
   /** Per surface, the declaration ChatGPT confirmed after a plugin refresh (or found already current). */
   confirmedConnectorSchemas?: Partial<Record<SurfaceId, string>>;
+  /** Read-only ledger health; no stored content or filesystem paths cross IPC. */
+  pluginRefreshUnreadable?: boolean;
+  /** True while the 2 GiB recording store refuses new images and long texts. */
+  recordingStorageFull?: boolean;
+  /** True when the saved keys exist but working secure storage could not read them; saves fail until the person starts fresh. */
+  credentialsUnreadable?: boolean;
   platform: PlatformInfo;
   /** Only packaged Windows builds may change the login item. */
   loginStartupAvailable?: boolean;

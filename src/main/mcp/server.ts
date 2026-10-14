@@ -469,7 +469,7 @@ export async function startMcpServer(
       };
       res.once('finish', release);
       res.once('close', release);
-      withInboundRequestId(requestId, () => withInboundOpenAiSession(openAiSession, () => void route.handler(req, res, body)), timing, publication);
+      withInboundRequestId(requestId, () => withInboundOpenAiSession(openAiSession, () => void route.handler(req, res, body)), timing, publication, !selfTest && !tunnelProbe);
     };
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       void readBoundedJsonBody(req).then((parsed) => {

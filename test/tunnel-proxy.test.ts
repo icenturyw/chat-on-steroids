@@ -1,74 +1,64 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { type MutableEnvironment } from '../src/main/env.js';
+import { describe, expect, it } from 'vitest';
+import { proxyEnvironment, proxyForLog, proxyUrlFromResolution } from '../src/main/tunnel/proxy.js';
 
-const resolveProxy = vi.hoisted(() => vi.fn(async (_url: string) => 'DIRECT'));
-vi.mock('electron', () => ({ session: { defaultSession: { resolveProxy } } }));
-
-const { applySystemProxy } = await import('../src/main/tunnel/proxy.js');
-
-beforeEach(() => { resolveProxy.mockReset().mockResolvedValue('DIRECT'); });
-
-describe('tunnel system proxy routing', () => {
-  it.each([
-    ['PROXY 127.0.0.1:10808', 'http://127.0.0.1:10808/'],
-    ['HTTPS proxy.example:8443', 'https://proxy.example:8443/'],
-    ['SOCKS5 [::1]:1080', 'socks5://[::1]:1080'],
-    ['PROXY proxy.example:8080; DIRECT', 'http://proxy.example:8080/']
-  ])('inherits the elected route %s', async (route, expected) => {
-    resolveProxy.mockResolvedValue(route);
-    const env: MutableEnvironment = { NO_PROXY: 'localhost,127.0.0.1,api.openai.com', MCP_SERVER_URL: 'url=http://127.0.0.1:1234/secret,channel=main' };
-    await applySystemProxy(env);
-    expect(resolveProxy).toHaveBeenCalledWith('https://api.openai.com');
-    expect(env.HTTPS_PROXY).toBe(expected);
-    expect(env.HTTP_PROXY).toBeUndefined();
-    expect(env.NO_PROXY).toBe('localhost,127.0.0.1,api.openai.com');
-    expect(env.MCP_SERVER_URL).toBe('url=http://127.0.0.1:1234/secret,channel=main');
+// #1255: the tunnel program only knows proxies from its environment. With a system proxy set
+// (and no TUN-style capture), it could not get out, and ChatGPT reported
+// "Tunnel-client has not been seen".
+describe("the system's proxy, as the tunnel program understands it", () => {
+  it('turns the browser engine\'s answer into a proxy address', () => {
+    expect(proxyUrlFromResolution('DIRECT')).toBeNull();
+    expect(proxyUrlFromResolution('')).toBeNull();
+    expect(proxyUrlFromResolution('PROXY 127.0.0.1:7890')).toBe('http://127.0.0.1:7890');
+    expect(proxyUrlFromResolution('HTTPS proxy.example.test:8443')).toBe('https://proxy.example.test:8443');
+    expect(proxyUrlFromResolution('SOCKS5 127.0.0.1:1080')).toBe('socks5://127.0.0.1:1080');
+    expect(proxyUrlFromResolution('PROXY [::1]:3128')).toBe('http://[::1]:3128');
   });
 
-  it.each(['CONTROL_PLANE_HTTP_PROXY', 'TUNNEL_CLIENT_HTTP_PROXY', 'HTTPS_PROXY', 'https_proxy'])(
-    'preserves the explicit %s configuration', async key => {
-      const env = { [key]: 'http://chosen.example:8080' };
-      await applySystemProxy(env);
-      expect(env).toEqual({ [key]: 'http://chosen.example:8080' });
-      expect(resolveProxy).not.toHaveBeenCalled();
+  it('takes the first usable entry of a list, and stops at DIRECT', () => {
+    expect(proxyUrlFromResolution('PROXY 10.0.0.1:8080; PROXY 10.0.0.2:8080; DIRECT')).toBe('http://10.0.0.1:8080');
+    // The tunnel program cannot use SOCKS4; the next entry can be used.
+    expect(proxyUrlFromResolution('SOCKS 10.0.0.1:1080; PROXY 10.0.0.2:8080')).toBe('http://10.0.0.2:8080');
+    expect(proxyUrlFromResolution('DIRECT; PROXY 10.0.0.2:8080')).toBeNull();
+    expect(proxyUrlFromResolution('SOCKS4 10.0.0.1:1080')).toBeNull();
+  });
+
+  it('refuses anything that is not a plain host and port', () => {
+    expect(proxyUrlFromResolution('PROXY user:secret@10.0.0.1:8080')).toBeNull();
+    expect(proxyUrlFromResolution('PROXY 10.0.0.1')).toBeNull();
+    expect(proxyUrlFromResolution('PROXY 10.0.0.1:8080/path')).toBeNull();
+    expect(proxyUrlFromResolution('PROXY bad host:8080')).toBeNull();
+  });
+
+  it('gives the variables for a system proxy, and keeps local addresses direct', () => {
+    expect(proxyEnvironment('PROXY 127.0.0.1:7890', {})).toEqual({
+      HTTPS_PROXY: 'http://127.0.0.1:7890',
+      NO_PROXY: 'localhost,127.0.0.1,::1'
+    });
+    expect(proxyEnvironment('PROXY 127.0.0.1:7890', { NO_PROXY: 'intranet.example.test' })).toEqual({ HTTPS_PROXY: 'http://127.0.0.1:7890' });
+    expect(proxyEnvironment('DIRECT', {})).toEqual({});
+  });
+
+  it('leaves HTTPS_PROXY alone when the person set it, however it is spelled', () => {
+    for (const name of ['HTTPS_PROXY', 'https_proxy', 'Https_Proxy']) {
+      expect(proxyEnvironment('PROXY 127.0.0.1:7890', { [name]: 'http://10.9.9.9:3128' })).toEqual({});
     }
-  );
-
-  it('keeps an HTTP proxy while resolving the separate HTTPS route', async () => {
-    resolveProxy.mockResolvedValue('PROXY proxy.example:8080');
-    const env: MutableEnvironment = { HTTP_PROXY: 'http://http-only.example:8080' };
-    await applySystemProxy(env);
-    expect(env.HTTP_PROXY).toBe('http://http-only.example:8080');
-    expect(env.HTTPS_PROXY).toBe('http://proxy.example:8080/');
+    // An empty variable is not a setting, and HTTP_PROXY is about plain http only.
+    expect(proxyEnvironment('PROXY 127.0.0.1:7890', { HTTPS_PROXY: '' })).toHaveProperty('HTTPS_PROXY', 'http://127.0.0.1:7890');
+    expect(proxyEnvironment('PROXY 127.0.0.1:7890', { HTTP_PROXY: 'http://10.9.9.9:3128' })).toHaveProperty('HTTPS_PROXY', 'http://127.0.0.1:7890');
   });
 
-  it.each(['HTTP_PROXY', 'http_proxy'])('preserves %s for an HTTP control plane', async key => {
-    const env = { [key]: 'http://chosen.example:8080', CONTROL_PLANE_BASE_URL: 'http://control.example' };
-    await applySystemProxy(env);
-    expect(env[key]).toBe('http://chosen.example:8080');
-    expect(resolveProxy).not.toHaveBeenCalled();
+  it('passes ALL_PROXY on, which the tunnel program does not read by itself', () => {
+    expect(proxyEnvironment('DIRECT', { all_proxy: 'socks5://127.0.0.1:1080' })).toEqual({
+      HTTPS_PROXY: 'socks5://127.0.0.1:1080',
+      NO_PROXY: 'localhost,127.0.0.1,::1'
+    });
+    // It is the person's own setting: it wins over the system's, and one the program cannot use is not replaced.
+    expect(proxyEnvironment('PROXY 127.0.0.1:7890', { ALL_PROXY: 'http://10.9.9.9:3128' })).toHaveProperty('HTTPS_PROXY', 'http://10.9.9.9:3128');
+    expect(proxyEnvironment('PROXY 127.0.0.1:7890', { ALL_PROXY: 'socks4://10.9.9.9:1080' })).toEqual({});
   });
 
-  it.each(['DIRECT', 'DIRECT; PROXY later.example:8080', 'SOCKS proxy.example:1080', 'PROXY user:password@proxy.example:8080', 'PROXY proxy.example:99999', 'PROXY proxy.example:8080/path', ''])('does not guess a replacement for %s', async route => {
-    resolveProxy.mockResolvedValue(route);
-    const env = {};
-    await applySystemProxy(env);
-    expect(env).toEqual({});
-  });
-
-  it('resolves the actual overridden control plane and preserves its protocol', async () => {
-    resolveProxy.mockResolvedValue('PROXY proxy.example:8080');
-    const env: MutableEnvironment = { CONTROL_PLANE_BASE_URL: 'http://control.example' };
-    await applySystemProxy(env);
-    expect(resolveProxy).toHaveBeenCalledWith('http://control.example');
-    expect(env.HTTP_PROXY).toBe('http://proxy.example:8080/');
-    expect(env.HTTPS_PROXY).toBeUndefined();
-  });
-
-  it('retains the inherited environment when the OS lookup fails', async () => {
-    resolveProxy.mockRejectedValue(new Error('private diagnostic'));
-    const env = { NO_PROXY: 'localhost' };
-    await applySystemProxy(env);
-    expect(env).toEqual({ NO_PROXY: 'localhost' });
+  it('keeps a proxy password out of the log', () => {
+    expect(proxyForLog('http://jane:secret@10.9.9.9:3128')).toBe('http://10.9.9.9:3128');
+    expect(proxyForLog('socks5://127.0.0.1:1080')).toBe('socks5://127.0.0.1:1080');
   });
 });

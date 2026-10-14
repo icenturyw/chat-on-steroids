@@ -1,5 +1,6 @@
 import { hasProviderDirective, resolvedCapture, withoutProviderDirectives } from '../shared/content-reference.js';
 import { initChatSearch, type ChatSearch } from './chat-search.js';
+import { initChatFind } from './chat-find.js';
 import { createWorkspaceTerminal } from './workspace-terminal.js';
 import { createWorkspaceDocks } from './workspace-docks.js';
 import { currentLanguage, ui, t } from './i18n.js';
@@ -8,7 +9,7 @@ import { imageStorageButton } from './image-storage.js';
 import { applyChatModels, applyComposerSessionModel, initChatModels, confirmedComposerModel, composerSendModel, ensureComposerModel, chatModelName } from './chat-models.js';
 import { marked, Marked, type TokenizerAndRendererExtension } from 'marked';
 import { safeExternalLink } from '../shared/external-link.js';
-import { createAgentPanel } from './agent-panel.js';
+import { createAgentPanel, workerName } from './agent-panel.js';
 import { createFilePanel } from './file-panel.js';
 import { renderAgentPlan } from './agent-plan.js';
 import { userPromptText } from '../shared/user-prompt.js';
@@ -31,7 +32,7 @@ import type { TurnTrace } from '../shared/turn-trace.js';
 import { initContextMeter, paintContextMeter } from './context-meter.js';
 import { installComposerDockMotion, installComposerHeightMotion } from './composer-motion.js';
 import { sanitizeHtmlTree } from './sanitize-html.js';
-import { drawMath, mathExtensions, type MathSlots } from './math.js';
+import { drawMath, mathExtensions, separateDisplayMath, type MathSlots } from './math.js';
 import { DEFAULT_HELPER_CHAT_MODEL, isAstraModel } from '../shared/chat-models.js';
 import { supportsFinishAutomation } from '../shared/finish.js';
 import { answerAnchors } from '../shared/markdown-export.js';
@@ -57,21 +58,26 @@ import type {
   RunningToolActivity,
   SessionChange,
   SessionEvent,
+  SessionSearchLocation,
   SessionSummary,
   StoredText,
   SwarmState,
-  TokenPressure
+  WorkerWorktreeCleanupOffer,
+  TokenPressure,
+  RecordingStorageLimitGiB
 } from '../shared/session.js';
 import {
   ATTRIBUTION_LABELS,
   CHAT_ACTIVE_MS,
   committedResumeAncestorsFromSummary,
   continuationMarkerOf,
+  DEFAULT_RECORDING_STORAGE_GIB,
+  RECORDING_STORAGE_LIMITS_GIB,
   TURN_OUTCOME_LABELS,
   foldProgress,
   toolCallSummary
 } from '../shared/session.js';
-import { chronological, positionOf } from '../shared/chronology.js';
+import { chronological, positionOf, residenceOf } from '../shared/chronology.js';
 import { recentChatActivity, sessionWorkingAt, workerReportedFinish } from '../shared/session-activity.js';
 import {
   DEFAULT_GOAL_MODEL,
@@ -88,6 +94,7 @@ import { openRowMenu, rowMenuOpenFor, toggleRowMenu, type RowMenuItem } from './
 
 const api = window.api;
 let chatSearch: ChatSearch | null = null;
+let chatFind: ReturnType<typeof initChatFind> | null = null;
 
 /** Sprite id per tool-call family. Deliberately reuses the existing icon set. */
 const KIND_ICON: Record<ActivitySummary['kind'], string> = {
@@ -150,6 +157,11 @@ let sessionPageCursor: { updatedAt: number; id: string } | null = null;
 let sessionPageLoading = false;
 /** True after the user has explicitly paged beyond the newest page. */
 let loadedOlderSessions = false;
+/**
+ * Where each project's own history continues (#1190): absent until the project was first
+ * expanded, a cursor while it has older chats that are not loaded, null once all of them are.
+ */
+const projectHistory = new Map<string, { cursor: { updatedAt: number; id: string } | null; asked: boolean; loading: boolean }>();
 let activeId: string | null = null;
 let selectedId: string | null = null;
 let newChatSelected = true;
@@ -248,12 +260,12 @@ async function removeProjectFromSidebar(id: string): Promise<void> {
     // Reject list snapshots captured before this newer catalog commit.
     ++sessionsLoadGeneration;
     projects = projects.map(row => row.id === id ? removed : row);
-    expandedProjects.delete(id); projectVisibleCounts.delete(id);
+    expandedProjects.delete(id); projectVisibleCounts.delete(id); projectHistory.delete(id);
     if (selectedProjectId === id) {
       if (!selectedId) {
         const oldKey = draftKey();
         const authoredDraft = authoredComposerText();
-        selectedProjectId = null; selectionGeneration++; replaceComposerDraft();
+        selectedProjectId = null; selectionGeneration++; chatFind?.selectionChanged(); replaceComposerDraft();
         // Keep the visible draft and its attachments while moving to unfiled.
         inputDrafts.set(draftKey(), authoredDraft); inputDrafts.delete(oldKey); newChatTasks.delete(oldKey);
         skillPicker?.restore();
@@ -513,7 +525,9 @@ function onDictationEvent(event: DictationEvent): void {
     if (['stopped', 'idle', 'ended', 'complete'].includes(status)) { completedDictation(session, 'Dictation stopped.'); return; }
     if (!session.stopping) {
       dictationPhase = ['starting', 'initializing', 'requesting'].includes(status) ? 'starting' : 'listening';
-      dictationNotice = dictationPhase === 'starting' ? 'Preparing microphone…' : 'Listening…';
+      dictationNotice = dictationPhase === 'starting' ? 'Preparing microphone…'
+        : event.engine === 'legacy' ? 'Listening with basic accuracy. For punctuation and better results, turn on online speech recognition in Windows settings.'
+          : 'Listening…';
       paintDictation();
     }
   }
@@ -994,6 +1008,51 @@ function sessionRow(summary: SessionSummary): HTMLElement {
  */
 let renaming: { id: string; original: string; value: string; start: number; end: number } | null = null;
 
+/** Slash commands that act on the open chat; New Chat does not offer them. */
+const CHAT_COMMANDS = new Set(['rename', 'pin', 'status', 'compact']);
+function openChatSummary(): SessionSummary | null {
+  return selectedId === null ? null : sessions.find(row => row.id === selectedId) ?? null;
+}
+/** Puts a request in front of what is already typed, for the user to read and send. */
+function prefillComposer(text: string): void {
+  const input = $<HTMLTextAreaElement>('chatInput');
+  const rest = input.value.trim();
+  input.value = rest ? `${text}\n\n${rest}` : text;
+  input.setSelectionRange(input.value.length, input.value.length);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+}
+function openSettingsTab(tab: string): void {
+  $('workspaceSettings').click();
+  document.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.click();
+}
+/** Codex's slash commands: each opens what the app already has, or prepares a request to send. */
+function runSlashCommand(name: string): void {
+  const chat = openChatSummary();
+  // The command's own click is still on its way to the outside-click handlers that close menus:
+  // open popups after it has passed.
+  const afterClick = (open: () => void): void => { window.setTimeout(open, 0); };
+  if (name === 'model' || name === 'reasoning') afterClick(() => {
+    const menu = $<HTMLDetailsElement>('modelMenu');
+    menu.open = true;
+    menu.querySelector<HTMLElement>('summary')?.focus();
+  });
+  else if (name === 'new') $('newChat').click();
+  else if (name === 'rename' && chat) startRename(chat);
+  else if (name === 'pin' && chat && pinnable(chat)) {
+    sidebarPins?.toggle(chat.id);
+    paintSessions();
+    toast(sidebarPins?.has(chat.id) ? t('Chat pinned') : t('Chat unpinned'));
+  } else if (name === 'pin') toast(t('This chat cannot be pinned yet.'));
+  else if (name === 'status') afterClick(() => { const meter = $('contextMeterButton'); if (meter.getAttribute('aria-expanded') !== 'true') meter.click(); });
+  else if (name === 'review') prefillComposer(t('Review the uncommitted changes in this project. Look for bugs, regressions and missing tests, and list what you find by severity with the file and line. Do not change any files.'));
+  else if (name === 'init') prefillComposer(t('Create an AGENTS.md for this project. Read the project first, then describe how it is built, tested and run, how it is laid out, and the conventions a coding agent should follow. Keep it short and accurate.'));
+  else if (name === 'usage') openSettingsTab('usage');
+  else if (name === 'feedback') openSettingsTab('activity');
+  else if (name === 'plugins') $('sidebarPlugins').click();
+  else if (name === 'pet') $('sidebarPets').click();
+}
+
 function startRename(summary: SessionSummary): void {
   const current = summary.title || '';
   renaming = { id: summary.id, original: current, value: current, start: 0, end: current.length };
@@ -1188,6 +1247,42 @@ async function loadMoreSessions(): Promise<void> {
   }
 }
 
+/** A chat the project's section can show: workers alone leave it looking empty. */
+function projectShowsChat(id: string): boolean {
+  return sessions.some(entry => projectGroup(entry.projectId) === id && entry.origin?.kind !== 'worker' &&
+    (!!entry.conversationId || entry.origin?.kind === 'desktop'));
+}
+
+/**
+ * Reads the next page of one project's own chats (#1190). Project headings come from the whole
+ * project list, but chats from the newest page of all history: a project whose chats are all
+ * older looked empty, and expanding it did nothing. Only that project's pages are read, so the
+ * cost is what the project holds, and the rest of the sidebar does not fill up with old chats.
+ * It never selects a chat. A failed read leaves the place as it was, for the next expand.
+ */
+async function loadProjectHistory(id: string): Promise<void> {
+  const state = projectHistory.get(id) ?? { cursor: null, asked: false, loading: false };
+  projectHistory.set(id, state);
+  if (state.loading || (state.asked && !state.cursor)) return;
+  state.loading = true;
+  try {
+    do {
+      const page = await run(api.listSessions({ projectId: id, limit: SESSION_PAGE_SIZE, ...(state.cursor ? { cursor: state.cursor } : {}) }));
+      if (!page) return;
+      state.asked = true;
+      state.cursor = page.nextCursor ?? null;
+      mergeSessionRows(page.sessions);
+      // Rows older than the newest page are now held: refreshes must keep them, as after scrolling.
+      loadedOlderSessions = true;
+      for (const entry of page.pressure) pressure.set(entry.id, entry);
+      paintSessions();
+      // A page of workers shows nothing; read on while the project is open and still looks empty.
+    } while (state.cursor && expandedProjects.has(id) && !projectShowsChat(id));
+  } finally {
+    state.loading = false;
+  }
+}
+
 function maybePageSessions(): void {
   if (!visible || !sessionPageCursor || sessions.length >= sessionTotal) return;
   const pane = $('sessionList').closest<HTMLElement>('.scroll');
@@ -1302,6 +1397,7 @@ function paintSessions(): void {
       const open = !expandedProjects.has(id);
       if (open) expandedProjects.add(id); else expandedProjects.delete(id);
       section.open = open;
+      if (open) void loadProjectHistory(id);
     });
     if (project) {
       // One button for the project's actions, as in ChatGPT; a right click on the row opens the same menu.
@@ -1329,10 +1425,16 @@ function paintSessions(): void {
     const count = projectVisibleCounts.get(id) ?? PROJECT_TASK_PAGE_SIZE;
     const shown = tasks.filter((task, index) => index < count || task.selected);
     section.append(...shown.flatMap(task => task.rows));
-    if (shown.length < tasks.length) {
+    // The project's own older chats count as "more" too, once it is known to have some (#1190).
+    const older = !!projectHistory.get(id)?.cursor;
+    if (shown.length < tasks.length || older) {
       const more = el('button', 'btn project-show-more', () => t("Show more")) as HTMLButtonElement;
       more.type = 'button'; ui(more, 'aria-label', () => t("Show more tasks in {0}", [project?.name ?? t("this project")]));
-      more.addEventListener('click', () => { projectVisibleCounts.set(id, count + PROJECT_TASK_PAGE_INCREMENT); paintSessions(); });
+      more.addEventListener('click', () => {
+        projectVisibleCounts.set(id, count + PROJECT_TASK_PAGE_INCREMENT);
+        if (older && count + PROJECT_TASK_PAGE_INCREMENT > tasks.length) void loadProjectHistory(id);
+        paintSessions();
+      });
       section.append(more);
     }
     projectSections.push(section);
@@ -1424,7 +1526,7 @@ function canonicalMessageKey(event: SessionEvent): string | null {
 function mergeDetailDelta(delta: SessionEvent[]): void {
   if (delta.length === 0) return;
   const merged = [...events];
-  const floor = events.length ? Math.min(...events.map(positionOf)) : 0;
+  const floor = events.length ? Math.min(...events.map(residenceOf)) : 0;
   const messageRows = new Map<string, number>();
   for (let index = 0; index < merged.length; index++) {
     const key = canonicalMessageKey(merged[index]!);
@@ -1437,7 +1539,7 @@ function mergeDetailDelta(delta: SessionEvent[]): void {
     else {
       // An old canonical revision is not newly authored history. Its original
       // page still owns it; admitting it here would evict an unrelated live row.
-      if (positionOf(event) < floor) continue;
+      if (residenceOf(event) < floor) continue;
       if (key) messageRows.set(key, merged.length);
       merged.push(event);
     }
@@ -1539,8 +1641,19 @@ function pendingComposerInput(): InputEntry | undefined {
       pendingNewInput?.generation === selectionGeneration && pendingNewInput.id === entry.id));
 }
 let durationTimer: number | undefined;
+/** Whether the selected chat's running turn takes a message now (Send directly). */
+function canSendQueuedNow(): boolean {
+  return selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledCanSendDirectly;
+}
+/** The running turn whose delivery choice was last set to the Follow-up default. */
+let followUpTurn: string | null = null;
+/** Codex's "Follow-up behavior": messages typed during a turn wait for its end instead of joining it. */
+function followUpQueues(): boolean {
+  return deps.state()?.config.ui.followUp === 'queue';
+}
 function paintDeliveryControls(): void {
   paintGoalProgress();
+  for (const button of document.querySelectorAll<HTMLButtonElement>('#finishQueue .queue-send-now')) button.hidden = !canSendQueuedNow();
   const working = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledTurnId !== null;
   const queueAtFinish = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledQueueAtFinish;
   const canInject = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledCanInject;
@@ -1566,6 +1679,12 @@ function paintDeliveryControls(): void {
   const explicitInjection = (canInject && (!files.length || injectableAttachments(files))) ||
     (canSendDirectly && files.length > 0 && injectableAttachments(files));
   if (injectionAction) injectionAction.hidden = !explicitInjection;
+  // Each running turn starts from the Follow-up default; a choice made in the menu lasts for that turn.
+  const turnKey = working && (canInject || canSendDirectly || queueAtFinish) ? `${selectedId}:${controlledTurnId}` : null;
+  if (turnKey !== followUpTurn) {
+    followUpTurn = turnKey;
+    if (turnKey) $<HTMLSelectElement>('sendMode').value = followUpQueues() ? 'after-turn' : 'auto';
+  }
   if ($<HTMLSelectElement>('sendMode').value === 'tool' && !explicitInjection) $<HTMLSelectElement>('sendMode').value = 'auto';
   if (canInject && explicitInjection && $<HTMLSelectElement>('sendMode').value === 'auto') $<HTMLSelectElement>('sendMode').value = 'tool';
   if (!canInject && !canSendDirectly && !queueAtFinish) $<HTMLSelectElement>('sendMode').value = 'auto';
@@ -1580,7 +1699,7 @@ function paintDeliveryControls(): void {
   send.dataset.action = stop ? 'stop' : 'send';
   ui(send, 'aria-label', () => stop ? (controlledStopPending ? t("Stop requested") : t("Stop turn")) : t("Send message"));
   if (stop && !working && pending) ui(send, 'aria-label', () => t("Cancel delivery"));
-  const planAction = selectedId ? t("Queue plan at Session finish") : t("Start full plan");
+  const planAction = selectedId && !chatKnownIdle(selectedId) ? t("Queue plan at Session finish") : t("Start full plan");
   if (preparedPlan && !stop) send.setAttribute('aria-label', planAction);
   else if (planMode && !stop) ui(send, 'aria-label', () => t("Generate plan"));
   send.classList.toggle('is-plan-ready', !!preparedPlan && !stop);
@@ -1643,6 +1762,14 @@ type TaskPlanDraft = { text: string; requestId: string | null; stages: string[] 
 // Planning belongs to its draft key. Completed stages own their captured objective
 // independently of composer edits; existing sessions hand them to the durable queue.
 const taskPlans = new Map<string, TaskPlanDraft>();
+/**
+ * Whether this chat is known to have no turn running (#1428). A plan in a running chat waits for
+ * its Session finish; in an idle one that finish never comes, so the plan is shown and Enter
+ * starts it, as in a new chat. A chat whose state is not known here keeps waiting for its turn.
+ */
+function chatKnownIdle(sessionId: string): boolean {
+  return controlledSessionId === sessionId && controlledSelection === selectionGeneration && controlledTurnId === null;
+}
 function currentPreparedPlan(): (TaskPlanDraft & { stages: string[] }) | null {
   const plan = taskPlans.get(draftKey());
   return plan?.stages ? plan as TaskPlanDraft & { stages: string[] } : null;
@@ -1699,7 +1826,7 @@ async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
       // unchanged source draft, before queue admission can yield to new typing.
       inputDrafts.delete(key);
       if (draftKey() === key) { replaceComposerDraft(); input.value = ''; skillPicker?.restore(); }
-      if (sessionId) await queuePreparedPlan(key, plan as TaskPlanDraft & { stages: string[] }, sessionId, projectId);
+      if (sessionId && !chatKnownIdle(sessionId)) await queuePreparedPlan(key, plan as TaskPlanDraft & { stages: string[] }, sessionId, projectId);
     }
     else plan.error = result.error;
   } catch (error) {
@@ -1738,7 +1865,7 @@ function paintPreparedPlan(): void {
       if (plan.stages.length) { paintPreparedPlan(); paintDeliveryControls(); } else cancelTaskPlan();
     });
     edit.disabled = remove.disabled = field.disabled = plan.sending;
-    ui(heading, 'title', () => selectedId ? t("Queued at Session finish; edit or delete this checkpoint independently.") : index === 0 ? t("Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.") : t("Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled."));
+    ui(heading, 'title', () => selectedId && !chatKnownIdle(selectedId) ? t("Queued at Session finish; edit or delete this checkpoint independently.") : index === 0 ? t("Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.") : t("Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled."));
     heading.append(label, text, edit, remove); row.append(heading, field, error); return row;
   }));
 }
@@ -1746,8 +1873,14 @@ async function sendPreparedPlan(): Promise<void> {
   const key = draftKey(), plan = currentPreparedPlan();
   if (!plan || plan.sending) return;
   if (selectedId) {
-    await queuePreparedPlan(key, plan, selectedId, sessions.find(row => row.id === selectedId)?.projectId ?? null);
-    return;
+    // Decided when it is sent: the chat may have started or finished a turn since the plan was written.
+    const target = selectedId, selection = selectionGeneration;
+    await refreshSessionControls();
+    if (selectedId !== target || selectionGeneration !== selection || taskPlans.get(key) !== plan || plan.sending) return;
+    if (!chatKnownIdle(target)) {
+      await queuePreparedPlan(key, plan, target, sessions.find(row => row.id === target)?.projectId ?? null);
+      return;
+    }
   }
   const tasks = plan.stages.map(stage => stage.trim());
   if (!tasks.length || tasks.some(task => !task) || JSON.stringify(tasks).length > 12000) { toast(t("Keep every stage nonempty and the plan below 12,000 characters.")); return; }
@@ -1977,9 +2110,9 @@ async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: nu
     } else if (prepend) {
       const boundary = olderBefore!;
       historyBefore = boundary;
-      const retained = events.filter(event => positionOf(event) >= boundary);
+      const retained = events.filter(event => residenceOf(event) >= boundary);
       events = retainTimelinePage(chronological(foldProgress([...folded, ...retained])), 'older');
-    } else events = chronological([...folded].sort((a, b) => positionOf(a) - positionOf(b)).slice(-MAX_TIMELINE_ROWS));
+    } else events = chronological([...folded].sort((a, b) => residenceOf(a) - residenceOf(b)).slice(-MAX_TIMELINE_ROWS));
     detailFor = wanted;
   }
   detailCursor = Math.max(opening ? 0 : detailCursor ?? 0,
@@ -2553,7 +2686,7 @@ export function renderedMarkdown(source: string, capture?: StoredText, reference
       return missing.outerHTML;
     }
   }] });
-  const html = parser.parse(text, { async: false });
+  const html = parser.parse(separateDisplayMath(text), { async: false });
   const box = renderedMessage({ text: html, chars: html.length, truncated: html.length > MAX_RENDERED_HTML_CHARS }, text);
   drawMath(box, math);
   if (capture?.text && !capture.truncated && capture.text.length <= MAX_RENDERED_HTML_CHARS) {
@@ -2805,9 +2938,16 @@ function jumpToLatest(): void {
  */
 async function revealSearchMatch(id: string, query: string): Promise<void> {
   const selection = selectionGeneration;
-  const current = (): boolean => selection === selectionGeneration && selectedId === id;
   const location = await run(api.locateSearchMatch(id, query));
-  if (!location || !current()) return;
+  if (!location || selection !== selectionGeneration || selectedId !== id) return;
+  await revealChatLocation(id, location);
+}
+
+/** Scrolls the open chat to one recorded message, loading the history page around it when needed. */
+async function revealChatLocation(id: string, location: SessionSearchLocation): Promise<void> {
+  const selection = selectionGeneration;
+  const current = (): boolean => selection === selectionGeneration && selectedId === id;
+  if (!current()) return;
   // The chat's own first page, and the fill that follows it, settle first.
   for (const deadline = Date.now() + 5000; detailFor !== id || historyLoading || historyDemand !== null;) {
     if (Date.now() > deadline || !current()) return;
@@ -3006,8 +3146,8 @@ async function fillTimelineHistory(): Promise<void> {
         break;
       }
       const cursor = demand.direction < 0
-        ? events.reduce((oldest, event) => Math.min(oldest, positionOf(event)), Infinity)
-        : events.reduce((newest, event) => Math.max(newest, positionOf(event)), 0);
+        ? events.reduce((oldest, event) => Math.min(oldest, residenceOf(event)), Infinity)
+        : events.reduce((newest, event) => Math.max(newest, residenceOf(event)), 0);
       if (!Number.isFinite(cursor) || (demand.direction < 0 && (cursor <= 1 || cursor === historyStart))) {
         historyDemand = null;
         break;
@@ -3016,8 +3156,8 @@ async function fillTimelineHistory(): Promise<void> {
       if (demand.sessionId !== selectedId || demand.selection !== selectionGeneration || detailFor !== selectedId) continue;
       if (!loaded) { if (demand === historyDemand) historyDemand = null; continue; }
       const next = demand.direction < 0
-        ? events.reduce((oldest, event) => Math.min(oldest, positionOf(event)), Infinity)
-        : events.reduce((newest, event) => Math.max(newest, positionOf(event)), 0);
+        ? events.reduce((oldest, event) => Math.min(oldest, residenceOf(event)), Infinity)
+        : events.reduce((newest, event) => Math.max(newest, residenceOf(event)), 0);
       if (demand === historyDemand && demand.opening) {
         // Filling a newly selected tail has not navigated away from live work.
         // User input replaces the demand and owns its position from then on.
@@ -3525,9 +3665,9 @@ function visibleEvents(): SessionEvent[] {
  * Keep the current visible rows plus the incoming stage; ordinary tall histories
  * still settle at 160 records. Dense collapsed activity has bounded extra room. */
 function retainTimelinePage(source: SessionEvent[], direction: 'older' | 'newer'): SessionEvent[] {
-  // Residency and navigation share the immutable origin domain. Display order
-  // can move a final across its turn's tools, but must not cut a hole in a page.
-  source = [...source].sort((a, b) => positionOf(a) - positionOf(b));
+  // Residency and navigation share one domain, the one the store pages by (`residenceOf`):
+  // immutable origins, except that a turn's final answer lives beside its turn's end.
+  source = [...source].sort((a, b) => residenceOf(a) - residenceOf(b));
   const pane = $('chatBody');
   const edge = pane.getBoundingClientRect().top;
   const protectedKeys = new Set<string>();
@@ -4408,6 +4548,8 @@ const turnStatusLine = turnLine('turn-worked turn-status');
  */
 /** Whether the latest turn was working at the last paint; the status line's class is never cleared. */
 let turnWorking = false;
+/** A redraw is scheduled to retire the running turn's lines after it ended. */
+let staleTurnRedraw = false;
 const turnNow = el('p', 'meta is-progress thinking-line turn-now');
 const turnNowIcon = el('span', 'turn-now-icon');
 const turnNowText = el('span', 'turn-now-text');
@@ -4686,7 +4828,7 @@ function liveActivity(): { text: string; icon: string; working: boolean; since?:
   if (call) return { text: call.title, icon: KIND_ICON[call.kind] ?? KIND_ICON.other, working: true, since: call.since };
   const thinking = { text: t('Thinking'), icon: '', working: false };
   // A message not yet recorded opens a turn that has done nothing visible so far.
-  if ($('inputQueue').querySelector('.pending-message')) return thinking;
+  if (messageOnItsWay()) return thinking;
   let asked = Number.NEGATIVE_INFINITY;
   for (const event of events) if (event.kind === 'user_message') asked = Math.max(asked, event.time);
   let newest: SessionEvent | undefined;
@@ -4800,27 +4942,63 @@ function placeTurnLines(rows: HTMLElement[], workedSeconds: ReadonlyMap<number, 
   turnWorking = working;
   const asks = rows.map((row, index) => ({ row, index, asked: Number(row.dataset.askedAt) }))
     .filter(entry => entry.row.matches('.ev-user_message') && Number.isFinite(entry.asked));
-  const pending = !!$('inputQueue').querySelector('.pending-message');
+  const pending = messageOnItsWay();
+  // A message sent while a turn already runs does not open that turn: the turn keeps its line under its
+  // own question. Parked after the pending message, the line said the chat had moved on to it, and the
+  // rows jumped again once it was delivered or cancelled (2026-10-12). Only a message that will open
+  // the work parks the line after it.
+  const runningBefore = working && openTurnId(events) !== null;
+  // A page of history read further up ends before the chat does: its newest question is not the one
+  // the running turn answers, so it keeps its own worked line and the live one stays off it.
+  const live = working && timelineReachesEnd();
   const used = new Set<string>();
   // Insert from the end so earlier indices stay valid.
   for (let i = asks.length - 1; i >= 0; i--) {
     const { index, asked } = asks[i]!;
     const latest = i === asks.length - 1;
-    if (latest && working && !pending) { rows.splice(index + 1, 0, turnStatusLine); rows.push(turnNow); continue; }
+    if (latest && live && (!pending || runningBefore)) { rows.splice(index + 1, 0, turnStatusLine); rows.push(turnNow); continue; }
     const seconds = workedSeconds.get(asked);
-    if (seconds === undefined || (latest && working)) continue;
+    if (seconds === undefined || (latest && live)) continue;
     rows.splice(index + 1, 0, workedLine(asked, seconds)); used.add(String(asked));
   }
   for (const key of workedLines.keys()) if (!used.has(key)) workedLines.delete(key);
+  // A long turn pushes its question out of the loaded rows: every row left is that turn's work, so its
+  // line heads them, where the question would put it. Parked after the queue it sat under the newest
+  // action and jumped back up whenever the question was loaded again (2026-10-12).
+  if (live && !pending && asks.length === 0 && (historyBefore !== null || totalEvents > events.length) && rows.length > 0) { rows.unshift(turnStatusLine); rows.push(turnNow); }
   const inTimeline = rows.includes(turnStatusLine);
   if (!inTimeline) parkTurnStatus(working);
   if (working && status) paintTurnStatus(status);
   $('chatState').classList.toggle('is-mirrored', !deps.state()?.config.ui.developerMode);
 }
 
-/** A running turn with no row yet: its line waits right after your pending message. */
+/**
+ * A message still on its way to ChatGPT. A failed delivery keeps its notice in the queue until it
+ * is retried or dismissed, but nothing of it is on its way: counting it parked the running turn's
+ * line after the queue for good, below the question it belongs to (measured 2026-10-12).
+ */
+function messageOnItsWay(): boolean {
+  return !!$('inputQueue').querySelector('.pending-message:not(.is-delivery-error)');
+}
+
+/** Whether the loaded rows reach the chat's newest event, as jumpToLatest decides it. */
+function timelineReachesEnd(): boolean {
+  if (historyBefore === null || detailCursor === null) return true;
+  return events.reduce((newest, event) => Math.max(newest, event.seq), 0) + 1 >= detailCursor;
+}
+
+/**
+ * A running turn with no row yet: its line waits right after your pending message.
+ *
+ * `after` re-inserts even nodes that are already there, and every re-insertion restarts the lines'
+ * animations. Repaints run several times a second while a turn works, so a parked line that was
+ * moved each time blinked ("Thinking" restarting about 15 times a second, measured 2026-10-12).
+ */
 function parkTurnStatus(working: boolean): void {
-  if (working) $('inputQueue').after(turnStatusLine, turnNow);
+  if (working) {
+    const queue = $('inputQueue');
+    if (queue.nextElementSibling !== turnStatusLine || turnStatusLine.nextElementSibling !== turnNow) queue.after(turnStatusLine, turnNow);
+  }
   else if (!turnStatusLine.closest('#timeline')) { turnStatusLine.remove(); turnNow.remove(); }
 }
 
@@ -4846,6 +5024,16 @@ function paintStateLine(): void {
   const developer = deps.state()?.config.ui.developerMode;
   if (!developer && !turnStatusLine.closest('#timeline')) parkTurnStatus(working === true);
   if (!developer && working === true) paintTurnStatus({ text: note.textContent ?? '', tone, working, ticking });
+  // The turn's end can reach this line after the rows were last drawn: the header already said
+  // "Worked for", while the timeline kept "Working for" and "Thinking" frozen until the next event
+  // (2026-10-12). Only a redraw of the rows retires them; one, after this repaint. The guard holds
+  // until the stale state itself ends: a redraw that cannot retire the lines (no rows to redraw)
+  // would otherwise schedule the next one from its own repaint, forever.
+  if (developer || working === true || !turnWorking) staleTurnRedraw = false;
+  else if (!staleTurnRedraw) {
+    staleTurnRedraw = true;
+    queueMicrotask(() => { if (turnWorking && stateLine().working !== true) paintDetail(); });
+  }
   // The turn lines carry the caption outside developer mode; the header keeps developer detail.
   note.classList.toggle('is-mirrored', !developer);
   const recovering = paintRecoveryStatus();
@@ -5056,9 +5244,8 @@ function paintSwarm(state: SwarmState): void {
           top.append(clear);
         }
         const sub = el('div', 'model-sub');
-        const bits = [t("{0} pending", [agent.pending]), t("{0} delivered", [agent.delivered])];
-        if (agent.conversationId) bits.push(t("chat bound"));
-        sub.textContent = bits.join(' · ');
+        ui(sub, 'textContent', () => [t("{0} pending", [agent.pending]), t("{0} delivered", [agent.delivered]),
+          ...(agent.conversationId ? [t("chat bound")] : [])].join(' · '));
         row.append(top, sub);
         if (agent.task) row.append(el('p', 'hint', agent.task));
         // Why it failed, not just that it did. A worker only reaches this state when its
@@ -5072,6 +5259,73 @@ function paintSwarm(state: SwarmState): void {
   // Gating on `running` left finished-but-present swarm state with no way out, which is
   // exactly the state a user wants to clear before starting the next run.
   $<HTMLButtonElement>('swarmReset').disabled = state.agents.length === 0 && state.retainedHistory !== true;
+}
+
+/** A presentation of already verified cleanup offers; no marker or filesystem discovery here. */
+export function paintWorktreeCleanupOffers(offers: WorkerWorktreeCleanupOffer[], panel: HTMLElement = $('worktreeCleanupList')): void {
+  if (!offers.length) {
+    const empty = el('div', 'setting worktree-cleanup-empty');
+    const message = el('span', 'setting-text');
+    message.append(el('b', '', () => t('No checkouts to remove')), el('em', '', () => t('Finished or cleared checkouts awaiting review will appear here.')));
+    empty.append(message);
+    panel.replaceChildren(empty);
+    return;
+  }
+
+  const rows = offers.map(offer => {
+    const row = el('div', 'setting worktree-checkout-row');
+    const copy = el('div', 'setting-text worktree-checkout-copy');
+    const name = () => workerName(offer.agentId, offer.label);
+    const title = el('b', 'worktree-checkout-name', name);
+    // The technical id is useful for support, but not as the prominent name.
+    title.title = offer.agentId;
+    const meta = el('span', 'worktree-checkout-status', () => offer.reason === 'completed' ? t('Finished')
+      : offer.reason === 'failed' ? t('Failed') : t('Cleared'));
+    const path = el('span', 'worktree-checkout-path', offer.workspace);
+    path.title = offer.workspace;
+    copy.append(title, meta);
+
+    const facts = el('div', 'worktree-checkout-facts');
+    if (offer.dirty) {
+      facts.append(el('span', 'chip worktree-risk', () => offer.changeCount > 1
+        ? t('{0} uncommitted changes', [offer.changeCount]) : t('Uncommitted changes')));
+    }
+    if (offer.ignoredFiles) facts.append(el('span', 'chip worktree-risk', () => t('Ignored files')));
+    if (offer.uniqueCommits) facts.append(el('span', 'chip worktree-commits', () => t('Commits only on this branch')));
+    if (!offer.dirty && !offer.ignoredFiles) {
+      facts.append(el('span', 'worktree-clean-state', () => t('Nothing would be lost')));
+    }
+    copy.append(facts, path);
+
+    // Use the same visible solid action as other Settings controls, not a quiet
+    // text-only link for a destructive workflow.
+    const remove = el('button', 'btn btn-solid worktree-remove-button', () => t('Remove checkout…'));
+    remove.setAttribute('type', 'button');
+    ui(remove, 'aria-label', () => `${t('Remove checkout…')} — ${name()}`);
+    remove.dataset.worktreeRemove = 'true';
+    remove.dataset.runId = offer.runId;
+    remove.dataset.agentId = offer.agentId;
+    row.append(copy, remove);
+    return row;
+  });
+  panel.replaceChildren(...rows);
+}
+
+async function showWorktreeCleanupOffers(): Promise<void> {
+  const review = $<HTMLButtonElement>('worktreeCleanupReview');
+  if (review.disabled) return;
+  const panel = $('worktreeCleanupList');
+  const restoreFocus = document.activeElement === review;
+  review.disabled = true;
+  panel.setAttribute('aria-busy', 'true');
+  try {
+    const offers = await run(api.listWorktreeCleanupOffers());
+    if (offers) paintWorktreeCleanupOffers(offers, panel);
+  } finally {
+    panel.removeAttribute('aria-busy');
+    review.disabled = false;
+    if (restoreFocus && document.activeElement === document.body) review.focus();
+  }
 }
 
 /**
@@ -5111,7 +5365,10 @@ export function chatSettingsPatch(current: Config): {
       retainDays: 0,
       // Both follow the single threshold above rather than being typed separately.
       advisoryTokens: threshold,
-      limitTokens: urgentFrom(threshold)
+      limitTokens: urgentFrom(threshold),
+      storageLimitGiB: (RECORDING_STORAGE_LIMITS_GIB as readonly number[]).includes(Number($<HTMLSelectElement>('recordingStorageLimit').value))
+        ? Number($<HTMLSelectElement>('recordingStorageLimit').value) as RecordingStorageLimitGiB
+        : current.sessions.storageLimitGiB ?? DEFAULT_RECORDING_STORAGE_GIB
     },
     compaction: {
       auto: $<HTMLInputElement>('autoCompact').checked,
@@ -5133,6 +5390,7 @@ export function chatSettingsPatch(current: Config): {
       strictChatAllowlist: $<HTMLInputElement>('strictChatAllowlist').checked,
       recoverAgentTabs: $<HTMLInputElement>('recoverAgentTabs').checked,
       waitForSubAgents: $<HTMLInputElement>('waitForSubAgents').checked,
+      autoWorktrees: $<HTMLInputElement>('autoWorktrees').checked,
       endSleepingWorkerProcesses: $<HTMLInputElement>('endSleepingWorkerProcesses').checked
     },
     goal: {
@@ -5537,6 +5795,7 @@ const CHAT_INPUTS = [
   'strictChatAllowlist',
   'recoverAgentTabs',
   'waitForSubAgents',
+  'autoWorktrees',
   'endSleepingWorkerProcesses',
   'autoContinue',
   'goalProvider',
@@ -5545,6 +5804,7 @@ const CHAT_INPUTS = [
   'goalReasoning',
   'handoffPrompt',
   'handoffLength',
+  'recordingStorageLimit',
   'goalPrompt',
   'goalObjectivePrompt',
   'goalLoopPrompt'
@@ -5607,6 +5867,11 @@ export function chatApply(state: AppState, previous?: Config): void {
     config.compaction.handoffLength ?? DEFAULT_HANDOFF_LENGTH,
     previous?.compaction.handoffLength
   );
+  applyChatValue(
+    $<HTMLSelectElement>('recordingStorageLimit'),
+    String(config.sessions.storageLimitGiB ?? DEFAULT_RECORDING_STORAGE_GIB),
+    previous === undefined ? undefined : String(previous.sessions.storageLimitGiB ?? DEFAULT_RECORDING_STORAGE_GIB)
+  );
   applyAutoCompactHint(config);
   $<HTMLInputElement>('autoCompactTokens').disabled = !config.compaction.auto;
 
@@ -5636,6 +5901,11 @@ export function chatApply(state: AppState, previous?: Config): void {
     $<HTMLInputElement>('waitForSubAgents'),
     config.multiAgent.waitForSubAgents === true,
     previous?.multiAgent.waitForSubAgents
+  );
+  applyChatChecked(
+    $<HTMLInputElement>('autoWorktrees'),
+    config.multiAgent.autoWorktrees === true,
+    previous?.multiAgent.autoWorktrees
   );
   applyChatChecked(
     $<HTMLInputElement>('endSleepingWorkerProcesses'),
@@ -5914,6 +6184,24 @@ async function refreshInputQueue(): Promise<void> {
         } else cancel.disabled = false;
       };
       if (entry.recovery) { card.append(cancel); return card; }
+      // Like Codex's Steer: send a message that waits for the end of the turn into the turn now.
+      if (entry.mode === 'after-turn' && !entry.attachments?.length && !entry.images?.length && !entry.stages?.length) {
+        const now = dockAction(() => t("Send now"), 'i-arrow-up', () => {});
+        now.classList.add('queue-send-now');
+        ui(now, 'title', () => t("Send into the running turn now"));
+        now.hidden = !canSendQueuedNow();
+        now.onclick = async () => {
+          if (now.disabled || !card.isConnected || selection !== selectionGeneration) return;
+          now.disabled = true;
+          const sent = await run(api.sendQueuedInputNow(entry.id));
+          if (!card.isConnected || selection !== selectionGeneration) return;
+          if (sent === false) toast(t("The turn ended before this message could join it. It stays queued."));
+          if (sent !== true) now.disabled = false;
+          inputQueueGeneration++;
+          void refreshInputQueue();
+        };
+        card.append(now);
+      }
       const queueSessionSummary = sessions.find(row => row.id === selectedId);
       const modelSelection = queueSessionSummary?.selectedModel;
       if (entry.mode === 'finish' && modelSelection?.conversationId === queueSessionSummary?.conversationId && isAstraModel(modelSelection?.model, modelSelection?.reasoningEffort)) {
@@ -6061,7 +6349,7 @@ async function stopCurrentTurn(): Promise<void> {
   finally { if (selectedId === id && selectionGeneration === generation) { controlledStopPending = false; void refreshSessionControls(); } }
 }
 let composerDiscoveryGeneration = 0;
-async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?: string, controlAction = false): Promise<boolean | void> {
+async function sendComposer(delivery?: 'finish' | 'auto' | 'after-turn', plan?: string[], planObjective?: string, controlAction = false): Promise<boolean | void> {
   const input = $<HTMLTextAreaElement>('chatInput');
   const key = draftKey();
   const projectId = selectedId ? sessions.find(row => row.id === selectedId)?.projectId ?? null : selectedProjectId;
@@ -6219,7 +6507,7 @@ function showView(name: string): void {
 function selectSession(id: string): void {
   const ownerChanged = id !== selectedId;
   rememberDraft();
-  selectionGeneration++; replaceComposerDraft();
+  selectionGeneration++; chatFind?.selectionChanged(); replaceComposerDraft();
   inputQueueGeneration++;
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
   newChatSelected = false;
@@ -6262,7 +6550,7 @@ function selectSession(id: string): void {
 }
 
 function selectNewChat(projectId: string | null = null): void {
-  rememberDraft(); selectionGeneration++; replaceComposerDraft(); pendingNewInput = null;
+  rememberDraft(); selectionGeneration++; chatFind?.selectionChanged(); replaceComposerDraft(); pendingNewInput = null;
   inputQueueGeneration++;
   $('finishQueue').replaceChildren(); $('finishQueue').hidden = true;
   newChatSelected = true; selectedId = null; selectedProjectId = projectId; detailFor = null; detailCursor = null;
@@ -6551,9 +6839,13 @@ export function initChat(next: Deps): void {
     list: scope => api.skillLibrary(scope), command: name => {
       if (name === 'plan') { $('createPlan').click(); return; }
       if (name === 'compact') { $('compactSession').click(); return; }
-      const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = name;
-      automation.dispatchEvent(new Event('change', { bubbles: true }));
-    } });
+      if (name === 'goal' || name === 'loop') {
+        const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = name;
+        automation.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+      }
+      runSlashCommand(name);
+    }, commandAvailable: name => !CHAT_COMMANDS.has(name) || openChatSummary() !== null });
   skillPicker.restore();
   $('generateFinishGoal').addEventListener('click', async () => {
     const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId, turnId = controlledTurnId;
@@ -6632,7 +6924,17 @@ export function initChat(next: Deps): void {
   });
   $('chatInput').addEventListener('keydown', (event) => {
     if (skillPicker?.keydown(event)) return;
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (currentPreparedPlan() || authoredComposerText().trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
+    // Codex's "Enter key behavior": Enter sends, or only Cmd/Ctrl+Enter does and Enter adds a line.
+    const enterSends = deps.state()?.config.ui.enterSends !== false || event.metaKey || event.ctrlKey;
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && enterSends) { event.preventDefault(); if (currentPreparedPlan() || authoredComposerText().trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
+    // Cmd/Ctrl+Shift+Enter sends the other way than the Follow-up default (Codex does the same).
+    else if (event.key === 'Enter' && event.shiftKey && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+      event.preventDefault();
+      if (!authoredComposerText().trim() && !imageDrafts.get(draftKey())?.length) return;
+      if ($('sendOptions').hidden || currentPreparedPlan() || taskPlans.has(draftKey())) { $<HTMLFormElement>('composer').requestSubmit(); return; }
+      retireDictation();
+      void sendComposer($<HTMLSelectElement>('sendMode').value === 'after-turn' ? 'auto' : 'after-turn');
+    }
   });
   $('composerSettings').addEventListener('toggle', paintTaskActions);
   $('composerSettings').querySelector('summary')!.addEventListener('click', () => {
@@ -6760,6 +7062,11 @@ export function initChat(next: Deps): void {
     } else void sendComposer(undefined, undefined, undefined, controlAction);
   });
 
+  chatFind = initChatFind({
+    selectedId: () => selectedId,
+    find: async (id, query) => (await run(api.findInChat(id, query))) ?? null,
+    reveal: revealChatLocation
+  });
   chatSearch = initChatSearch({
     select: (id, match) => {
       if (id !== selectedId) { pendingNewInput = null; selectSession(id); }
@@ -6887,12 +7194,49 @@ export function initChat(next: Deps): void {
     const state = await run(api.resetSwarm());
     if (state) {
       paintSwarm(state);
-      toast(t('Workers cleared'));
+      toast(t('Workers cleared; retained Git checkouts can be reviewed below.'));
     }
   });
 
   // Which of the two things happened is decided in the main process and reported back,
   // so the toast describes the actual outcome rather than the intent of the click.
+  $('worktreeCleanupSection').addEventListener('click', async (event) => {
+    const target = event.target as HTMLElement;
+    if (target.closest<HTMLElement>('[data-worktree-review]')) {
+      await showWorktreeCleanupOffers();
+      return;
+    }
+    const worktreeRemove = target.closest<HTMLElement>('[data-worktree-remove]');
+    if (worktreeRemove) {
+      const runId = worktreeRemove.dataset.runId;
+      const agentId = worktreeRemove.dataset.agentId;
+      if (!runId || !agentId) return;
+      const button = worktreeRemove as HTMLButtonElement;
+      if (button.disabled) return;
+      const restoreFocus = document.activeElement === button;
+      const initialActions = [...$('worktreeCleanupList').querySelectorAll<HTMLButtonElement>('[data-worktree-remove]')];
+      const initialIndex = initialActions.indexOf(button);
+      button.disabled = true;
+      try {
+        const result = await run(api.removeWorktreeCleanupOffer(runId, agentId));
+        if (!result) return;
+        toast(result.removed ? t('Worker checkout removed; its Git branch was preserved.') : t('Worker checkout kept.'));
+        await showWorktreeCleanupOffers();
+      } finally {
+        // If confirmation is cancelled or inspection fails, the action stays usable.
+        button.disabled = false;
+        // Refresh replaces the clicked row. Keep keyboard focus in the same group rather
+        // than dropping it to the page body when the focused control is detached.
+        if (restoreFocus && (document.activeElement === button || document.activeElement === document.body ||
+            !document.activeElement?.isConnected)) {
+          const actions = [...$('worktreeCleanupList').querySelectorAll<HTMLButtonElement>('[data-worktree-remove]')];
+          const same = actions.find(action => action.dataset.runId === runId && action.dataset.agentId === agentId);
+          (same ?? actions[Math.min(Math.max(initialIndex, 0), actions.length - 1)] ?? $('worktreeCleanupReview')).focus();
+        }
+      }
+      return;
+    }
+  });
   $('swarmList').addEventListener('click', async (event) => {
     const target = event.target as HTMLElement;
     const button = target.closest<HTMLElement>('[data-clear]');
@@ -6903,9 +7247,9 @@ export function initChat(next: Deps): void {
     paintSwarm(outcome.swarm);
     toast(
       outcome.cleared === 'run'
-        ? t('Run cleared — every worker ended')
+        ? t('Run cleared — worker Git checkouts can be reviewed below')
         : outcome.cleared === 'worker'
-          ? t('{0} cleared — its slot is free', [id])
+          ? t('{0} cleared — its checkout can be reviewed below', [id])
           : t(outcome.reason)
     );
   });

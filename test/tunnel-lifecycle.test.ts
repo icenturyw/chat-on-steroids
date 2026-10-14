@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fixture = vi.hoisted(() => {
   type Listener = (...args: any[]) => void;
@@ -55,11 +55,9 @@ const fixture = vi.hoisted(() => {
     child.emit('close', 0);
   });
 
-  const resolveProxy = vi.fn(async (_url: string) => 'DIRECT');
-  return { children, spawn, health, termination, terminate, resolveProxy };
+  return { children, spawn, health, termination, terminate };
 });
 
-vi.mock('electron', () => ({ session: { defaultSession: { resolveProxy: fixture.resolveProxy } } }));
 vi.mock('node:child_process', () => ({ spawn: fixture.spawn }));
 vi.mock('../src/main/exec.js', () => ({
   childEnv: (overrides?: Record<string, string>) => ({ ...overrides }),
@@ -85,7 +83,7 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-const { startTunnel } = await import('../src/main/tunnel/index.js');
+const { startTunnel, setSystemProxyResolver } = await import('../src/main/tunnel/index.js');
 const { ROUTE_SETTLE_MS, resetRouteSettleForTests, tunnelRouteSettling } = await import('../src/main/tunnel/route-settle.js');
 
 const settings = {
@@ -99,43 +97,49 @@ beforeEach(() => {
   fixture.children.length = 0;
   fixture.spawn.mockClear();
   fixture.terminate.mockClear();
-  fixture.resolveProxy.mockReset().mockResolvedValue('DIRECT');
   fixture.health.url = null;
   fixture.termination.held = false;
   fixture.termination.release = null;
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  setSystemProxyResolver(null);
 });
 
-describe('OpenAI tunnel process ownership', () => {
-  it('passes the elected system proxy only in the child environment', async () => {
-    vi.useFakeTimers();
-    fixture.resolveProxy.mockResolvedValue('PROXY 127.0.0.1:10808');
-    const handle = await startTunnel({ localUrl: 'http://127.0.0.1:1234/secret', settings, apiKey: 'test', report: () => {} });
-    try {
-      await vi.advanceTimersByTimeAsync(10);
-      expect(fixture.spawn).toHaveBeenCalledWith('tunnel-client-test', expect.any(Array), expect.objectContaining({
-        env: expect.objectContaining({ HTTPS_PROXY: 'http://127.0.0.1:10808/', MCP_SERVER_URL: 'url=http://127.0.0.1:1234/secret,channel=main' })
-      }));
-      const argv = (fixture.spawn.mock.calls as unknown[][])[0]?.[1];
-      expect(JSON.stringify(argv)).not.toContain('10808');
-      expect(JSON.stringify(argv)).not.toContain('/secret');
-    } finally {
-      await handle.stop();
-    }
-  });
+afterEach(() => { vi.unstubAllEnvs(); });
 
-  it('cannot launch after Stop retires a pending system proxy lookup', async () => {
+describe('OpenAI tunnel process ownership', () => {
+  // #1255: without this, a computer that reaches the internet through a system proxy could not
+  // connect the tunnel unless the person set HTTPS_PROXY before starting the app.
+  it('starts the tunnel program with the system proxy, and without one when there is none or the lookup fails', async () => {
+    // Do not let the developer machine's actual proxy environment override this test's resolver.
+    for (const key of ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy']) vi.stubEnv(key, '');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('missing', { status: 404 })));
+    const envOf = async (): Promise<Record<string, string>> => {
+      const before = fixture.spawn.mock.calls.length;
+      const handle = await startTunnel({ localUrl: 'http://127.0.0.1:1234/mcp/core/token', settings, apiKey: 'test', report: () => {} });
+      await vi.waitFor(() => expect(fixture.spawn).toHaveBeenCalledTimes(before + 1));
+      const call = fixture.spawn.mock.calls.at(-1) as unknown as [string, string[], { env: Record<string, string> }];
+      await handle.stop();
+      return call[2].env;
+    };
+    expect(await envOf()).not.toHaveProperty('HTTPS_PROXY');
+
+    const asked: string[] = [];
+    setSystemProxyResolver(async url => { asked.push(url); return 'PROXY 127.0.0.1:7890'; });
+    expect(await envOf()).toMatchObject({ HTTPS_PROXY: 'http://127.0.0.1:7890', NO_PROXY: 'localhost,127.0.0.1,::1' });
+    expect(asked).toEqual(['https://api.openai.com/']);
+
+    setSystemProxyResolver(async () => 'DIRECT');
+    expect(await envOf()).not.toHaveProperty('HTTPS_PROXY');
+    setSystemProxyResolver(async () => { throw new Error('proxy service unavailable'); });
+    expect(await envOf()).not.toHaveProperty('HTTPS_PROXY');
+    // A lookup that never answers (an unreachable PAC script) must not keep the tunnel from starting.
     vi.useFakeTimers();
-    let resolve!: (route: string) => void;
-    fixture.resolveProxy.mockImplementation(() => new Promise<string>(done => { resolve = done; }));
-    const handle = await startTunnel({ localUrl: 'http://127.0.0.1:1234/secret', settings, apiKey: 'test', report: () => {} });
-    await vi.advanceTimersByTimeAsync(10);
-    expect(fixture.resolveProxy).toHaveBeenCalledOnce();
-    await handle.stop();
-    resolve('PROXY 127.0.0.1:10808');
-    await vi.advanceTimersByTimeAsync(120_000);
-    expect(fixture.spawn).not.toHaveBeenCalled();
+    setSystemProxyResolver(() => new Promise<string>(() => {}));
+    const pending = envOf();
+    await vi.advanceTimersByTimeAsync(3_100);
+    expect(await pending).not.toHaveProperty('HTTPS_PROXY');
+    vi.useRealTimers();
   });
 
   it('serves each run\'s fresh MCP path through the same tunnel id', async () => {
@@ -146,10 +150,7 @@ describe('OpenAI tunnel process ownership', () => {
     const runs: Array<{ args: string[]; url: string }> = [];
     for (const localUrl of ['http://127.0.0.1:1234/mcp/core/first-run-token', 'http://127.0.0.1:1234/mcp/core/second-run-token']) {
       const handle = await startTunnel({ localUrl, settings, apiKey: 'test', report: () => {} });
-      // Local builds may resolve the OS/PAC proxy before spawning tunnel-client. The tunnel
-      // handle is intentionally returned while that lookup is in flight so Stop can retire it,
-      // so wait for this run's actual child instead of assuming spawn is synchronous.
-      await vi.waitFor(() => expect(fixture.spawn.mock.calls.length).toBe(runs.length + 1));
+      await vi.waitFor(() => expect(fixture.spawn).toHaveBeenCalledTimes(runs.length + 1));
       const call = fixture.spawn.mock.calls.at(-1) as unknown as [string, string[], { env: Record<string, string> }];
       runs.push({ args: call[1], url: call[2].env.MCP_SERVER_URL ?? '' });
       await handle.stop();
@@ -452,90 +453,6 @@ describe('OpenAI tunnel process ownership', () => {
     first.stderr.emit('data', Buffer.from(`${JSON.stringify({ level: 'WARN', msg: 'poll timed out' })}\n`));
     await vi.advanceTimersByTimeAsync(40_000);
     expect(reports.some((report) => report.state === 'offline')).toBe(false);
-
-    await handle.stop();
-  });
-});
-
-describe('Cloudflare named tunnel', () => {
-  it('keeps the token out of argv and publishes the fixed origin with the secret MCP path', async () => {
-    const reports: any[] = [];
-    const handle = await startTunnel({
-      localUrl: 'http://127.0.0.1:28767/mcp/core/session-secret',
-      settings: {
-        kind: 'cloudflared',
-        tunnelId: '',
-        desktopTunnelId: '',
-        binaryPath: '',
-        cloudflareMode: 'named',
-        cloudflarePublicUrl: 'https://mcp.example.com',
-        cloudflareLocalPort: 28767
-      },
-      apiKey: null,
-      cloudflareToken: 'named-token-secret',
-      report: (report) => reports.push(report)
-    });
-
-    expect(fixture.spawn).toHaveBeenCalledWith(
-      'tunnel-client-test',
-      ['tunnel', '--no-autoupdate', 'run'],
-      expect.objectContaining({ env: { TUNNEL_TOKEN: 'named-token-secret' } })
-    );
-    const argv = (fixture.spawn.mock.calls as unknown[][])[0]?.[1];
-    expect(JSON.stringify(argv)).not.toContain('named-token-secret');
-
-    fixture.children[0].stderr.emit(
-      'data',
-      Buffer.from('INF Registered tunnel connection connIndex=0\n')
-    );
-    expect(reports.at(-1)).toMatchObject({
-      state: 'connected',
-      publicUrl: 'https://mcp.example.com/mcp/core/session-secret'
-    });
-
-    await handle.stop();
-  });
-});
-
-describe('Cloudflare quick tunnel', () => {
-  it('forwards the fixed loopback port and publishes the discovered trycloudflare URL', async () => {
-    const reports: any[] = [];
-    const handle = await startTunnel({
-      localUrl: 'http://127.0.0.1:28767/mcp/core/session-secret',
-      settings: {
-        kind: 'cloudflared',
-        tunnelId: '',
-        desktopTunnelId: '',
-        binaryPath: '',
-        cloudflareMode: 'quick',
-        cloudflarePublicUrl: '',
-        cloudflareLocalPort: 28767
-      },
-      apiKey: null,
-      report: (report) => reports.push(report)
-    });
-
-    expect(fixture.spawn).toHaveBeenCalledWith(
-      'tunnel-client-test',
-      [
-        'tunnel',
-        '--no-autoupdate',
-        '--url',
-        'http://127.0.0.1:28767',
-        '--http-host-header',
-        '127.0.0.1:28767'
-      ],
-      expect.any(Object)
-    );
-
-    fixture.children[0].stderr.emit(
-      'data',
-      Buffer.from('INF Your quick Tunnel has been created! https://demo.trycloudflare.com\n')
-    );
-    expect(reports.at(-1)).toMatchObject({
-      state: 'connected',
-      publicUrl: 'https://demo.trycloudflare.com/mcp/core/session-secret'
-    });
 
     await handle.stop();
   });

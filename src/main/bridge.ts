@@ -62,7 +62,7 @@ import { CHAT_ACTIVE_MS, CHAT_SILENCE_MS, continuationMarkerOf, isReasoningEffor
 import { blockedChatIds, isChatBlocked, chatBlockedAt } from './session/blocked-chats.js';
 export { CHAT_ACTIVE_MS, CHAT_SILENCE_MS } from '../shared/session.js';
 import { effectiveCapabilities, getConfig, updateConfig } from './config.js';
-import { BROWSER_BRIDGE_PORTS } from '../shared/browser-bridge.js';
+import { BROWSER_BRIDGE_AUTO_PORTS } from '../shared/browser-bridge.js';
 import { bridgePortSelection } from './bridge-ports.js';
 import type { Config } from '../shared/types.js';
 import type { PluginSurface } from '../shared/plugin-refresh.js';
@@ -172,6 +172,7 @@ import { ownCoreHint,
   pendingWorkerSpawns,
   primeConversationGone,
   primeConversation,
+  workerBootstrapWorktreeIdentity,
   requestWorkerRevivals,
   rollbackWorkerRevivalClaim,
   releaseQuiescentRun,
@@ -193,6 +194,7 @@ import { ownCoreHint,
   workerRevivalDeliveredSince,
   type WorkerRevival
 } from './agents.js';
+import { lookupWorkerWorkspace, validateWorkerWorkspaceLease } from './worktrees/index.js';
 import {
   abortContinuation,
   abortContinuationNow,
@@ -234,7 +236,7 @@ import { bindAgentWorkspace } from './workspace.js';
 import { extensionUpdateOffer, prepareExtensionUpdate, shippedExtensionBuild } from './extension-path.js';
 
 /** Fixed candidates so the extension can find the app without being told a port. */
-export const DEFAULT_PORTS = BROWSER_BRIDGE_PORTS;
+export const DEFAULT_PORTS = BROWSER_BRIDGE_AUTO_PORTS;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 /** Durable settled-turn orphan safety net. */
 export const STALE_SWARM_MS = 2 * 60_000;
@@ -4531,13 +4533,38 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       }
     }
     const described = describe(command, client, claimedSummary);
-    if (described.text && command.spec.type === 'worker') {
-      // A newly spawned worker gets setup once. Revival and Compact & Resume
-      // carry their own continuation text without repeating executor setup.
-      const sourceConversation = primeConversation(command.spec.runId);
-      const source = sourceConversation ? await findSessionByConversation(sourceConversation, { requireUnique: true }) : null;
-      const sessionId = source?.conversationId === sourceConversation ? source?.id : undefined;
-      described.text = await prepareSessionPrompt(described.text, { sessionId });
+    if (described.text && (command.spec.type === 'worker' || command.spec.type === 'revive')) {
+      // The broker knows whether this *exact* worker was allocated an isolated checkout.
+      // Its allocation id survives a restart or a new active run incarnation, unlike the
+      // current run id or the display-only worker slot name.
+      let allocation: { runId: string; agentId: string } | null;
+      try {
+        allocation = workerBootstrapWorktreeIdentity(command.spec.runId, command.spec.agent);
+      } catch {
+        return json(res, 409, { error: 'worker_identity_changed' }, origin);
+      }
+      let workingDirectory: string | undefined;
+      if (allocation) {
+        const lease = lookupWorkerWorkspace(allocation);
+        if (!lease) return json(res, 409, { error: 'worker_worktree_unavailable' }, origin);
+        try {
+          workingDirectory = (await validateWorkerWorkspaceLease(lease, getConfig().roots)).workspace.virtual;
+        } catch {
+          return json(res, 409, { error: 'worker_worktree_unavailable' }, origin);
+        }
+      }
+      if (command.spec.type === 'worker') {
+        // New workers read the source project's AGENTS.md, but when a worktree is allocated
+        // only that verified checkout may be presented as their working directory.
+        const sourceConversation = primeConversation(command.spec.runId);
+        const source = sourceConversation ? await findSessionByConversation(sourceConversation, { requireUnique: true }) : null;
+        const sessionId = source?.conversationId === sourceConversation ? source?.id : undefined;
+        described.text = await prepareSessionPrompt(described.text, { sessionId, workingDirectory });
+      } else if (workingDirectory) {
+        // Revivals carry the prime's latest user-authored message, without repeating Core or
+        // source AGENTS. Reassert the same checkout after a restart or worker reuse.
+        described.text += `\n\n(Chat On Steroids worker working directory: ${workingDirectory}. Keep worker task changes in this allocated Git worktree; the source project only supplies instructions.)`;
+      }
     }
     if (!commands.includes(command) || command.owner !== client) return json(res, 409, { error: 'command_taken' }, origin);
     const liveResume = command.spec.type === 'resume' ? continuationByToken(command.spec.token) : null;
@@ -5098,7 +5125,7 @@ export async function sweepStaleSwarm(now = Date.now()): Promise<boolean> {
   const compactionsQueued = await inspectOwedCompactions(now);
 
   const silenceChanged = silent.queued || silent.spent.length > 0 || goalsQueued || compactionsQueued;
-  finishSilentChats(silent.spent);
+  finishSilentChats(silent.spent, silent.inspected);
   return silenceChanged || brokerChanged;
 }
 
@@ -5497,7 +5524,10 @@ async function startBridgeOnce(epoch: number, prepared?: PreparedBridge): Promis
     cancelWorkerCommands(reason, undefined, runId);
   });
   if (staleSwarmTimer) clearInterval(staleSwarmTimer);
+  // A stopped bridge is not a sleeping computer: the first tick of a new timer measures no gap.
+  lastRecoverySweepTickAt = 0;
   staleSwarmTimer = setInterval(() => {
+    noteRecoverySweepTick(Date.now());
     void runStaleSwarmSweep().catch((err: Error) => logWarn(`stale swarm sweep failed: ${err.message}`));
     void retryUnclaimedBrowserInputs().catch((err: Error) => logWarn(`unclaimed browser input recovery failed: ${err.message}`));
   }, STALE_SWARM_SWEEP_MS);
@@ -6653,6 +6683,32 @@ interface ActivityGrant {
 
 const activeUntil = new Map<string, ActivityGrant>();
 
+/** How long a working chat gets to report again after the computer wakes, before any recovery. */
+export const WAKE_GRACE_MS = 90_000;
+/** The sweep ticks every 30 seconds; a gap this long means nothing ran in between. */
+const WAKE_GAP_MS = 2 * 60_000;
+let lastRecoverySweepTickAt = 0;
+/**
+ * Called on every tick of the recovery sweep's timer. While the computer sleeps (or this process
+ * is stopped) no timer fires, so on waking every activity deadline is long past and the first
+ * sweep would call each working chat silent and reload them all in the same second, before one
+ * page had reconnected and reported. Reloads of several chats at once are also what draws
+ * ChatGPT's history limit. A tick that comes much later than its timer allows gives every
+ * working chat a fresh, short deadline instead.
+ */
+export function noteRecoverySweepTick(now: number): boolean {
+  const gap = lastRecoverySweepTickAt === 0 ? 0 : now - lastRecoverySweepTickAt;
+  lastRecoverySweepTickAt = now;
+  if (gap < WAKE_GAP_MS) return false;
+  let held = 0;
+  for (const grant of activeUntil.values()) {
+    if (grant.until >= now + WAKE_GRACE_MS) continue;
+    grant.until = now + WAKE_GRACE_MS; held += 1;
+  }
+  logInfo(`bridge: nothing ran for ${Math.round(gap / 60_000)} minute(s) (the computer slept, or this app was paused) — ${held} working chat(s) get ${WAKE_GRACE_MS / 1000} seconds to report before any recovery`);
+  return true;
+}
+
 /** Chats reloaded by the app whose page has given no sign of life since. */
 const awaitingReturn = new Set<string>();
 
@@ -6747,6 +6803,8 @@ export function recoveryHeldByCalls(conversationId: string): boolean {
   const since = grant ? unknownCallHold.get(grant) : undefined;
   return since === undefined || Date.now() - since < UNKNOWN_CALL_HOLD_MS;
 }
+/** How long a provider access limit with no Retry-After holds the silence watch ("wait a few minutes"). */
+export const ACCESS_LIMIT_HOLD_MS = 5 * 60_000;
 export const PRO_SILENCE_MS = 10 * 60_000;
 export const PRO_ACTIVITY_MS = 10 * 60_000;
 /**
@@ -6827,7 +6885,7 @@ async function silenceContinuationAllowed(conversationId: string, sessionId?: st
   const starts = await readRecentEvents(session.id, 1, { kinds: ['turn_start'] });
   const start = starts[0];
   if (!start || start.turnId !== sourceTurnId) return false;
-  if (!await turnHasMcpCall(session.id, conversationId, sourceTurnId)) return false;
+  if (!await answerHasMcpCall(session.id, conversationId, sourceTurnId)) return false;
   if (pending && loopAfterTurnFor(conversationId)) {
     const work = await readRecentEvents(session.id, 1, { kinds: ['user_message', 'assistant_message', 'tool_call', 'page_tool', 'turn_start'] });
     // A refresh can discover an older interim for the first time, or replace its
@@ -7048,7 +7106,7 @@ async function fileSilenceInputTicket(conversationId: string, now: number, liste
   const repair = repairsInFlight.get(conversationId);
   if (!grant?.turnId || now - grant.evidenceAt < silenceWindowMs(grant) ||
       repair?.reason !== 'silence' || repair.state !== 'done' || repair.sessionId !== grant.sessionId ||
-      !await turnHasMcpCall(grant.sessionId, conversationId, grant.turnId)) return false;
+      !await answerHasMcpCall(grant.sessionId, conversationId, grant.turnId)) return false;
   const current = () => activeUntil.get(conversationId) === grant && repairsInFlight.get(conversationId) === repair &&
     !stopRequestedFor(conversationId) && !isChatBlocked(conversationId) &&
     !continuationForSession(grant.sessionId) && !silenceHeldByCalls(conversationId, grant) &&
@@ -7224,7 +7282,19 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
   const boundary = await readRecoveryBoundary(sessionId, activeUntil.get(conversationId)?.turnId);
   const session = await getSession(sessionId);
   if (session?.conversationId !== conversationId || session.browserRecoveryDismissedAt !== undefined || isChatBlocked(conversationId) || stopRequestedFor(conversationId) ||
-      continuationForSession(sessionId) || supersededSourceConversations().includes(conversationId)) return [];
+      supersededSourceConversations().includes(conversationId)) return [];
+  // An automatic Compact & Resume owns this chat's recovery while it is open. Its wait for the turn
+  // to end was shown only on ChatGPT's page; this app showed an idle chat with nothing happening
+  // (2026-10-12). Say where it stands. "Waiting for this turn" only while the turn really works:
+  // a dead turn under that label read as a chat waiting on nothing.
+  if (continuationForSession(sessionId)) {
+    const compaction = compactionWatch.get(conversationId);
+    // Only before the request goes out: from then on the chat's own Compact & Resume row shows
+    // the brief being written, saved and the new chat opening, and a second row repeated it.
+    const phase = compaction?.phase !== 'asking' ? null : sessionInputActivity(session).exact ? 'waiting' : 'asking';
+    return compaction && phase && pendingContinuations().some(entry => entry.from === conversationId && entry.token === compaction.token)
+      ? [{ kind: 'compaction', phase, deadline: Math.max(compaction.nextAt, Date.now()) }] : [];
+  }
   const result: import('../shared/recovery.js').RecoveryCountdown[] = [];
   const pendingRepair = repairsInFlight.get(conversationId);
   if (pendingRepair?.sessionId === sessionId && pendingRepair.state !== 'done' && workerRecoveryAllowed(conversationId) && departureAllowsRepair(session)) {
@@ -7305,7 +7375,7 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
   const source = boundary?.kind === 'turn_start' || boundary?.kind === 'turn_end' ? boundary.turnId : null;
   if (!source || (session.activeTurnId && session.activeTurnId !== source)) return result;
   if (boundary?.kind === 'turn_end' && boundary.outcome === 'stopped') return result;
-  if (!await turnHasMcpCall(sessionId, conversationId, source)) return result;
+  if (!await answerHasMcpCall(sessionId, conversationId, source)) return result;
   const repair = repairsInFlight.get(conversationId);
   const confirmed = repair?.reason === 'silence' && repair.state === 'done' && repair.sessionId === sessionId;
   const owned = grant?.sessionId === sessionId && grant.turnId === source;
@@ -7528,7 +7598,7 @@ async function silenceRepairCurrent(conversationId: string, repair: Repair): Pro
 
 /** Scheduler, page return and pre-action claim share the same durable source verdict. */
 async function silenceSourceCurrent(conversationId: string, grant: ActivityGrant): Promise<boolean> {
-  if (!grant.turnId || !await turnHasMcpCall(grant.sessionId, conversationId, grant.turnId) ||
+  if (!grant.turnId || !await answerHasMcpCall(grant.sessionId, conversationId, grant.turnId) ||
       await readCompletedFinal(grant.sessionId, conversationId, grant.turnId)) return false;
   const boundary = await readRecoveryBoundary(grant.sessionId, grant.turnId);
   const session = await getSession(grant.sessionId);
@@ -8128,6 +8198,17 @@ async function noteRecoveryObservations(
       const preserveGoalRecovery = !!sessionId && recorded?.conversationId === conversationId &&
         goalActiveFor(conversationId) && grant?.sessionId === sessionId &&
         (!item.turnId || grant.turnId === item.turnId);
+      // A chat whose user wants unfinished work continued keeps its watch too, deferred past the
+      // limit: ChatGPT's Retry-After when it gave one, otherwise a few minutes, as its dialog asks.
+      // Retiring it left a turn that dropped into a limit with no Retry-After stopped for good,
+      // though the page came back minutes later (2026-10-12).
+      const keepForContinue = !preserveGoalRecovery && !!sessionId && recorded?.conversationId === conversationId &&
+        grant?.sessionId === sessionId && (!item.turnId || grant.turnId === item.turnId) &&
+        recoveryInputAllowed(sessionId, conversationId);
+      if (keepForContinue) {
+        grant!.until = Math.max(grant!.until, providerHistoryBackoff(conversationId) ?? item.time + ACCESS_LIMIT_HOLD_MS);
+        continue;
+      }
       if (!preserveGoalRecovery) endActivity(conversationId);
       continue;
     }
@@ -8400,6 +8481,25 @@ function browserRecoveryMonitoring(): boolean {
  * seventeen quiet minutes. Repeated sweeps of the same grant say nothing new.
  */
 const silenceNotes = new Set<string>();
+
+/**
+ * Whether the answer this turn belongs to made a recorded local call. A page reloaded after a lost
+ * stream opens a new local turn for the same question, and that turn holds none of the calls made
+ * before the reload: on 2026-10-12 a prime's turn reopened that way after a delivery timeout, went
+ * silent, and silence recovery refused it as having no tool call while every call sat on the turn
+ * before it. An earlier turn answering the same question counts.
+ */
+async function answerHasMcpCall(sessionId: string, conversationId: string, turnId: string): Promise<boolean> {
+  if (await turnHasMcpCall(sessionId, conversationId, turnId)) return true;
+  const turns = (await getSession(sessionId))?.timelineTurns;
+  const turn = turns?.[turnId];
+  if (!turn?.questionId) return false;
+  for (const [id, earlier] of Object.entries(turns!)) {
+    if (id !== turnId && earlier.questionId === turn.questionId && earlier.origin < turn.origin &&
+        await turnHasMcpCall(sessionId, conversationId, id)) return true;
+  }
+  return false;
+}
 function noteSilence(conversationId: string, grant: ActivityGrant, reason: string): void {
   const key = `${conversationId}:${grant.turnId ?? '-'}:${grant.sessionId}:${reason}`;
   if (silenceNotes.has(key)) return;
@@ -8408,10 +8508,22 @@ function noteSilence(conversationId: string, grant: ActivityGrant, reason: strin
   logInfo(`bridge: silence recovery for ${conversationId} — ${reason}`);
 }
 
-async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent: string[] }> {
+/**
+ * The grant and repair a silence pass found spent, by chat. The pass awaits tickets and pickups
+ * before it retires them, and a new turn that starts meanwhile owns a new grant (every grant is a
+ * new object): only what was inspected is this pass's to retire (#1360).
+ */
+type SpentSilence = Map<string, { grant: ActivityGrant; repair: Repair | undefined }>;
+
+async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent: string[]; inspected: SpentSilence }> {
   let queued = false;
   let deferred = false;
   const spent: string[] = [];
+  const inspected: SpentSilence = new Map();
+  const markSpent = (conversationId: string, grant: ActivityGrant): void => {
+    spent.push(conversationId);
+    inspected.set(conversationId, { grant, repair: repairsInFlight.get(conversationId) });
+  };
   const compacting = new Set(pendingContinuations().map((entry) => entry.from));
   for (const [conversationId, grant] of activeUntil) {
     if (grant.until > now) continue;
@@ -8426,12 +8538,12 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     }
     // Observation owns liveness, never permission to interrupt the native page.
     // Only an exactly recorded local call in this source turn earns silence repair.
-    if (!grant.turnId || !await turnHasMcpCall(grant.sessionId, conversationId, grant.turnId)) {
+    if (!grant.turnId || !await answerHasMcpCall(grant.sessionId, conversationId, grant.turnId)) {
       if (activeUntil.get(conversationId) === grant) {
         noteSilence(conversationId, grant, grant.turnId
           ? `not available: turn ${grant.turnId} has no tool call recorded for this chat (calls from ChatGPT's code mode are often not attributed)`
           : 'not available: the silent work has no turn');
-        spent.push(conversationId);
+        markSpent(conversationId, grant);
       }
       continue;
     }
@@ -8456,7 +8568,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     // sleeps it from the block itself, grant or no grant.)
     if (isChatBlocked(conversationId)) {
       noteSilence(conversationId, grant, 'not available: this chat is blocked');
-      spent.push(conversationId);
+      markSpent(conversationId, grant);
       continue;
     }
     // Only positively identified Pro work earns the longer recovery clock.
@@ -8475,7 +8587,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
         continue;
       }
       noteSilence(conversationId, grant, 'not available: automatic recovery is off for this chat and no Goal, Loop or queued message waits on it');
-      spent.push(conversationId);
+      markSpent(conversationId, grant);
       continue;
     }
     const held = repairsInFlight.get(conversationId);
@@ -8486,7 +8598,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
         continue;
       }
       noteSilence(conversationId, grant, `spent: its ${held.reason} reload already happened`);
-      spent.push(conversationId);
+      markSpent(conversationId, grant);
       continue;
     }
     // A turn-scoped repair is a different question about a different subject, and is superseded
@@ -8518,7 +8630,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
         if (!grant.thinkingFailed && now < activityDeadline(grant)) deferred = true;
         else {
           noteSilence(conversationId, grant, 'spent: the silent work is no longer this chat\'s current turn (a newer question, a close or a Stop)');
-          spent.push(conversationId);
+          markSpent(conversationId, grant);
         }
       }
       continue;
@@ -8532,12 +8644,15 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     }
   }
   if (deferred) armSilenceSweep(now);
-  return { queued, spent };
+  return { queued, spent, inspected };
 }
 
 /** Retires a confirmed one-shot silence recovery after the caller has handled any Worker slot. */
-function finishSilentChats(conversationIds: readonly string[]): void {
+function finishSilentChats(conversationIds: readonly string[], inspected?: SpentSilence): void {
   for (const conversationId of conversationIds) {
+    const seen = inspected?.get(conversationId);
+    // New work replaced the grant while this pass was awaiting: its watch is not this pass's to end.
+    if (seen && activeUntil.get(conversationId) !== seen.grant) continue;
     // The last moment anything is watching this chat. If its final turn failed or stalled and
     // nothing followed, this is where it would otherwise be put down in silence — see
     // failedTurnQuiet. The wording says which of the two happened, because "ended in a transport
@@ -8567,6 +8682,8 @@ function finishSilentChats(conversationIds: readonly string[]): void {
     // Keep the existing exact receipt until genuine activity retires it. A large
     // replacement page can report Thinking failed after this maintenance pass.
     const repair = repairsInFlight.get(conversationId);
+    // Likewise a repair filed during those awaits belongs to whatever filed it.
+    if (seen && repair !== seen.repair) continue;
     if (repair?.reason !== 'goal' && repair?.reason !== 'unattributed' && (repair?.reason !== 'silence' || repair.state !== 'done' || !repair.progress?.turnId))
       repairsInFlight.delete(conversationId);
   }
@@ -8863,6 +8980,21 @@ async function inspectOwedCompactions(now: number): Promise<boolean> {
     }
     const schedule = COMPACTION_PICKUPS[phase];
     if (now < watch.nextAt) continue;
+    // The handoff request is sent when the source turn has finished. While that turn still works,
+    // a pickup only reloads a busy page and spends the budget: on 2026-10-12 an automatic ticket
+    // filed mid-turn spent all ten pickups on a generating page, wrote "Trying to reload chat to
+    // recover a handoff request that has not been sent" each time, and gave up (handoff_never_sent)
+    // just after the turn finally ended. Wait for the turn instead, without counting.
+    // A turn whose activity window ran out a pickup interval ago is silent, not working. Silence recovery leaves a
+    // compacting chat to this ticket, so waiting on that turn too left both waiting on each other:
+    // on 2026-10-12 a page lost its stream, the model stopped calling tools, and the open turn kept
+    // the handoff from being asked for until someone intervened.
+    const grant = activeUntil.get(entry.from);
+    const silent = grant?.sessionId === entry.sessionId && grant.until + schedule.every <= now && runningToolProgress(entry.from) === null;
+    if (phase === 'asking' && session && !silent && sessionInputActivity(session).exact) {
+      watch.nextAt = now + schedule.every;
+      continue;
+    }
     if (watch.attempts >= schedule.attempts) {
       if (phase === 'writing' && !watch.told) {
         // The sent request stays protected and gets no fourth reload, but the person reading
@@ -9413,6 +9545,8 @@ async function takePendingRepairs(
     /** Raise the tab (or open the chat in front) before acting: a background tab is throttled. */
     focus: boolean;
     requiresClaim?: boolean;
+    /** A silence repair whose confirmation files an automatic Continue, so an error page may be kept. */
+    continueFollows?: boolean;
   }> = [];
   for (const [conversationId, repair] of repairsInFlight) {
     // Another browser holds this chat. Offered here, a reload finds no tab and opens a copy.
@@ -9473,7 +9607,8 @@ async function takePendingRepairs(
         !stopRequestedFor(conversationId))
       {
         ready.push({ conversationId, token: repair.token, reason: repair.reason, focus: repair.reason === 'compaction',
-          ...(repairNeedsClaim(repair) ? { requiresClaim: true } : {}) });
+          ...(repairNeedsClaim(repair) ? { requiresClaim: true } : {}),
+          ...(repair.reason === 'silence' && recoveryInputAllowed(repair.sessionId, conversationId) ? { continueFollows: true } : {}) });
       }
   }
   if (ready.length) logInfo(`bridge: handing the browser ${ready.length} repair(s): ` +
@@ -10860,6 +10995,7 @@ export function resetBridgeForTests(): void {
   providerHistoryBackoffUntil.clear();
   providerDeferredColdStarts.clear();
   activeUntil.clear();
+  lastRecoverySweepTickAt = 0;
   awaitingReturn.clear();
   lastAttributedCallAt.clear();
   fiberHealth.clear();

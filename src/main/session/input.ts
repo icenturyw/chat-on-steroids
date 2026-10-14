@@ -660,6 +660,21 @@ function append(current: InputEntry[], entry: InputEntry, stackDirect = false): 
     return (!row.companionInputId || retained.has(row.companionInputId)) && (!root || retained.has(root.id));
   }), ...active, ...current.filter(row => !retained.has(row.id) && active.some(root => sameDelivery(root, row) || root.id === row.companionInputId)), entry];
 }
+/**
+ * Whether a message of yours must reach this chat through ChatGPT's composer, never a tool result.
+ *
+ * On a model that is not Pro, text inside a tool result never reached the model (#1231). Measured
+ * 2026-10-12 on GPT-6 Thinking: while the page kept closing a turn whose request kept calling tools,
+ * four messages in a row were folded into tool results, never appeared in the conversation and were
+ * not acted on as the user's words. Pro turns, images and attachments keep the tool path.
+ */
+function composerOnlyText(entry: Pick<InputEntry, 'images' | 'attachments' | 'attachmentDelivery' | 'toolImages'> & Parameters<typeof manualInput>[0],
+  session: Pick<SessionSummary, 'conversationId' | 'selectedModel'> | null | undefined): boolean {
+  const selection = session?.selectedModel;
+  return manualInput(entry) && !entry.images?.length && !entry.attachments?.length && !entry.toolImages?.length &&
+    !!session?.conversationId && selection?.conversationId === session.conversationId && !!selection.model &&
+    !isProModel(selection.model, selection.reasoningEffort);
+}
 async function target(entry: InputEntry): Promise<string | null> {
   if (entry.purpose === 'decision') {
     if (entry.conversationId && isChatBlocked(entry.conversationId)) throw new Error('Unblock this helper conversation before sending');
@@ -731,6 +746,11 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
     // turn takes one, the explicit choice goes through the composer too. Files keep the tool path.
     if (input.delivery === 'tool' && !input.attachmentDelivery && !input.attachments?.length && !input.images?.length &&
         input.mode === 'auto' && !finishOwner && !input.stages?.length && policy?.directTurn) delete input.delivery;
+    // Not a Pro turn and no direct turn to join: the text waits for the composer instead.
+    if (!finishOwner && !input.stages?.length && composerOnlyText({ ...input, mode: input.mode }, requestedSession)) {
+      if (input.delivery === 'tool') delete input.delivery;
+      if (policy?.canInject) policy = { ...policy, canInject: false };
+    }
     const toolDelivery = input.delivery === 'tool' || input.attachmentDelivery === 'tool';
     if (toolDelivery) {
       const turnId = policy?.directTurn?.id ?? policy?.injectionTurnId;
@@ -1021,6 +1041,27 @@ export function editQueuedInput(id: string, text: string, afterTurn?: boolean): 
     if (current.filter(entry => !terminal(entry)).reduce((sum, entry) => sum + Buffer.byteLength(entry === row ? value : entry.text), 0) > 1024000) throw new Error('Queued messages exceed the text limit');
     await commit(current.map(entry => entry === row ? { ...row, text: value, authoredSource: 'text',
       ...(afterTurn === undefined ? {} : { afterTurn }), deliveryText: undefined, autoSkills: undefined } : entry));
+    return true;
+  });
+}
+
+/**
+ * Sends one queued follow-up into the running turn now, the way Send directly would (Codex calls
+ * this Steer). Only a plain text message waiting for the end of the turn qualifies, and only while
+ * that turn can be joined through ChatGPT's own composer; otherwise it keeps waiting.
+ */
+export function sendQueuedInputNow(id: string): Promise<boolean> {
+  return serial(async () => {
+    const current = await load();
+    const row = current.find(entry => entry.id === id && entry.state === 'queued' && entry.mode === 'after-turn' && queuedFollowup(entry) &&
+      !entry.recovery && !entry.finishOwner && !entry.attachments?.length && !entry.images?.length && !entry.stages?.length && !!entry.sessionId);
+    if (!row) return false;
+    const policy = await sessionInputPolicy(row.sessionId!);
+    if (!policy.directTurn) return false;
+    // The person chose immediate delivery for this message; it is no longer an after-turn request.
+    const { requestedMode: _requested, silenceBoundary: _silence, ...rest } = row;
+    await commit(current.map(entry => entry === row ? { ...rest, mode: 'auto' as const, directTurn: policy.directTurn!, transportIntent: 'browser' as const,
+      dueAt: Math.min(row.dueAt, Date.now()) } : entry));
     return true;
   });
 }
@@ -1721,6 +1762,7 @@ export function offerToolInput(sessionId: string | null | undefined, conversatio
       // A message for the running turn goes through the composer only: in a tool result the model
       // never saw it (#1231). If the page cannot take it, it is sent once the turn has ended.
       if (entry.directTurn && entry.state === 'queued') return entry;
+      if (entry.state === 'queued' && entry.delivery !== 'tool' && composerOnlyText(entry, session)) return entry;
       // ChatGPT may reuse one request id for the whole server turn. Receipt follows
       // the actual invocation start, never a change in that grouping id.
       const received = toolInputReceipt(entry, sessionId, conversationId, startedAt);

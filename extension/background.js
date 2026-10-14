@@ -27,7 +27,9 @@ import './i18n.js';
 
 const activeTabs = globalThis.chrome?.debugger ? createActiveTabs(chrome) : null;
 
-const PORTS = [8765, 8766, 8767, 8768, 8769];
+// The app's Auto order (src/shared/browser-bridge.ts): the primary range, then two fallback ranges
+// for when Windows reserves 8765-8769 (#1314). Refused local ports fail at once, so scanning is cheap.
+const PORTS = [8765, 8766, 8767, 8768, 8769, 18765, 18766, 18767, 18768, 18769, 38765, 38766, 38767, 38768, 38769];
 const HELLO_TIMEOUT_MS = 1200;
 const REQUEST_TIMEOUT_MS = 10_000;
 /** A journal receipt follows durable session writes, which can outlast an ordinary read. */
@@ -3246,6 +3248,7 @@ async function maintainOnce() {
       token: entry && typeof entry.token === 'string' ? entry.token : '',
       reason: typeof entry?.reason === 'string' ? entry.reason : '',
       requiresClaim: entry?.requiresClaim === true,
+      continueFollows: entry?.continueFollows === true,
       suspended: entry?.reason === 'stalled',
       focus: Boolean(entry && entry.focus === true)
     }))
@@ -3372,7 +3375,7 @@ function repairChangeDetail(latest) {
 }
 
 async function performBrowserRepairs(repairs, policy) {
-  for (const { conversationId, token, reason, focus, requiresClaim, suspended } of repairs) {
+  for (const { conversationId, token, reason, focus, requiresClaim, continueFollows, suspended } of repairs) {
     // Re-scanned per repair rather than reused from above. Earlier entries in this same batch
     // may have created a tab, and the scan has to be the state immediately before the action or
     // the duplicate rule below is deciding on a tab list that no longer exists.
@@ -3491,6 +3494,22 @@ async function performBrowserRepairs(repairs, policy) {
           continue;
         }
         if (reason === 'assistant-error' && status?.ok === true && status.assistantError === false) {
+          await call(`/status?repaired=${encodeURIComponent(token)}&repairAction=preserved`);
+          continue;
+        }
+      }
+      if (target && reason === 'silence' && continueFollows) {
+        // A silent chat whose page still shows ChatGPT's own transport error ("Connection
+        // interrupted. Waiting for the complete answer", a delivery timeout) is not helped by a
+        // reload: on 2026-10-12 each such reload left the prime on the same card or ran into
+        // ChatGPT's history limit ("this conversation could not be loaded"), while Stop and a
+        // Continue got it working at once. The app files that Continue when this repair is
+        // confirmed, and its delivery presses Stop first when ChatGPT still shows it, so the
+        // page is left as it is. Only when the app says that Continue will follow: with automatic
+        // recovery off and no Goal nothing is filed, and the reload stays the chat's one chance.
+        const status = await tabReply(target.id, { type: 'clf-page-status' },
+          documentId ? { documentId } : undefined);
+        if (status?.ok === true && status.assistantError === true) {
           await call(`/status?repaired=${encodeURIComponent(token)}&repairAction=preserved`);
           continue;
         }

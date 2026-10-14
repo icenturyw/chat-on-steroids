@@ -24,10 +24,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import * as identity from '../src/main/connector-identity.js';
 import { connectorName } from '../src/shared/connector-names.js';
 import { effectiveCapabilities, defaultConfig, getConfig } from '../src/main/config.js';
-import { EXEC_COMMAND_CMD_DESCRIPTION, LAUNCHES_WINDOWS_POWERSHELL_5 } from '../src/main/codex/tool-specs.js';
+import { EXEC_COMMAND_CMD_DESCRIPTION, LAUNCHES_WINDOWS_POWERSHELL_5, WINDOWS_SHELL_GUIDANCE } from '../src/main/codex/tool-specs.js';
 import { skillCatalogInstructions } from '../src/main/skills.js';
 import { lastRequestAt, selfTestHeaders, startMcpServer, tunnelProbeHeaders, type McpEndpoint } from '../src/main/mcp/server.js';
 import { lastToolCallAt, type ToolContext } from '../src/main/mcp/tools.js';
+import { publishPluginSurface, pluginRefreshStatuses, resetPluginRefreshForTests } from '../src/main/plugin-refresh.js';
 import { friendlyError } from '../src/main/mcp/kernel.js';
 import { openAiConversationKey } from '../src/main/mcp/inbound.js';
 import { serverInstructions } from '../src/main/mcp/instructions.js';
@@ -451,6 +452,19 @@ describe('endpoint hardening', () => {
 
     await core('tools/call', { name: 'read', arguments: { paths: ['/workspace/src/app.ts'] } });
     expect(lastToolCallAt()).not.toBeNull();
+  });
+
+  it('counts only successful provider calls as current-publication working evidence', async () => {
+    resetPluginRefreshForTests();
+    publishPluginSurface('core', 'Chat On Steroids Core', 'test', '', [{ name: 'read', description: 'Read', inputSchema: { type: 'object' } }]);
+    try {
+      await rawPost(endpoint.urls.core, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'read', arguments: { paths: ['/workspace/notes.txt'] } } }), selfTestHeaders());
+      expect((await pluginRefreshStatuses()).core?.responding).toBeUndefined();
+      await core('tools/call', { name: 'read', arguments: { paths: ['/workspace/missing-file'] } });
+      expect((await pluginRefreshStatuses()).core?.responding).toBeUndefined();
+      await core('tools/call', { name: 'read', arguments: { paths: ['/workspace/notes.txt'] } });
+      expect((await pluginRefreshStatuses()).core).toMatchObject({ responding: true });
+    } finally { resetPluginRefreshForTests(); }
   });
 
   it('counts a request to either surface as ChatGPT reaching this PC', async () => {
@@ -979,7 +993,18 @@ describe('surface boundaries', () => {
     // shared context once instead of per worker, to batch messages into one call, and to
     // hand back RESULT/CHANGES/VALIDATION/BLOCKERS — bytes spent once at discovery to save
     // a great many in every run that follows.
+    // #1417: ChatGPT's approval reviewer stopped long runs with "Suspicious instruction: the tool
+    // description tries to dictate the classification and the handling of sensitive or suspicious
+    // content". What we declare describes; it does not rule on risk. (Checked on the constant as
+    // well, because the Windows text is only part of the declaration on Windows.)
+    const RULES_ON_RISK = /safety rules|\bbenign|harmless|suspicious/i;
+    expect(WINDOWS_SHELL_GUIDANCE).not.toMatch(RULES_ON_RISK);
+    // The Windows notes were a list of prohibitions; other tools use these words to describe what they do.
+    expect(WINDOWS_SHELL_GUIDANCE).not.toMatch(/\bnever\b|\bdo not\b|\bdestructive\b/i);
+    // The advice itself stays.
+    for (const fact of ['-LiteralPath', 'Remove-Item', 'Move-Item', '-WindowStyle Hidden', 'cmd /c']) expect(WINDOWS_SHELL_GUIDANCE).toContain(fact);
     for (const tool of [...coreTools, ...desktopTools]) {
+      expect(JSON.stringify(tool), `${tool.name} declaration`).not.toMatch(RULES_ON_RISK);
       const bytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
       const budget =
         (BROWSER_TOOLS as readonly string[]).includes(tool.name)
@@ -998,8 +1023,8 @@ describe('surface boundaries', () => {
               ? 3_645
               : tool.name === 'exec_command'
                 // Windows carries `WINDOWS_SHELL_GUIDANCE` in the same description, and that text
-                // is quoted verbatim from Codex's own shell spec — it is not ours to trim to fit a
-                // budget. The non-Windows number is the one that says whether *our* additions have
+                // carries Codex's own shell advice in full (reworded for #1417) — it is not ours
+                // to trim to fit a budget. The non-Windows number is the one that says whether *our* additions have
                 // grown, so both are asserted rather than one loose bound covering both.
                 ? (process.platform === 'win32' ? 3_800 : 3_500)
                 : 3_000;
@@ -2136,6 +2161,19 @@ describe('bounded output', () => {
     expect(text).toContain('The nearest existing folder is /workspace/src/lib; it contains: f util.ts');
     const top = await core('tools/call', { name: 'read', arguments: { paths: ['/workspace/lib/util.ts'] } });
     expect(textOf(top)).toMatch(/The nearest existing folder is \/workspace; it contains: .*d src, .*f notes\.txt/);
+  });
+
+  it('points a path built under the wrong root at the root it names, and lists nothing else', async () => {
+    // 2026-10-12, live: with roots /downloads and /voxelcraft a model read
+    // /downloads/.Dev-projects/voxelcraft/shared/adventure.ts. The hint listed the user's Downloads
+    // folder, unrelated to the project, instead of naming the file it was after.
+    ctx.roots = [{ name: 'downloads', path: outside }, { name: 'workspace', path: approved }];
+    const reply = await core('tools/call', { name: 'read', arguments: { paths: ['/downloads/projects/workspace/src/app.ts'] } });
+    const text = textOf(reply);
+    expect(failed(reply)).toBe(true);
+    expect(text).toContain('Did you mean /workspace/src/app.ts?');
+    expect(text).not.toContain('passwords.txt');
+    expect(text).not.toContain('nearest existing folder');
   });
 
   it('reads a per-path line range spelled as path:start-end', async () => {

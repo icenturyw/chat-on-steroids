@@ -89,7 +89,7 @@
         </section>
 
         <div class="sidebar-bottom">
-          <button class="btn" id="workspaceSettings" type="button"><i class="ico ph ph-gear-six" aria-hidden="true"></i>Settings</button>
+          <button class="btn" id="workspaceSettings" type="button"><i class="ico ph ph-gear-six" aria-hidden="true"></i><span class="sidebar-bottom-label">Settings</span></button>
           <div class="connection-anchor">
             <button
               class="sidebar-connection"
@@ -194,6 +194,7 @@
                 <label class="setting"><span class="setting-text"><b>Send messages with</b><em>Which key sends what you type. With ⌘Enter (Ctrl+Enter on Windows and Linux), Enter starts a new line.</em></span><select id="enterSends"><option value="enter">Enter</option><option value="modifier">⌘Enter / Ctrl+Enter</option></select></label>
                 <label class="setting"><span class="setting-text"><b>Keep awake while a chat works</b><em>Stops the computer from going to sleep, so long runs keep going. Some Windows laptops still sleep once the screen turns off; for those, choose The computer and screen.</em></span><select id="keepAwake"><option value="off">Off</option><option value="computer">The computer</option><option value="screen">The computer and screen</option></select></label>
                 <label class="setting"><span class="setting-text"><b>Playful status words</b><em>Show rotating gym jokes instead of “Working”.</em></span><input id="playfulStatus" type="checkbox" /></label>
+                <label class="setting"><span class="setting-text"><b>Playful asides in automatic Continue</b><em>Add a random fun fact or meme joke to each automatic Continue, marked for the model to ignore.</em></span><input id="playfulContinue" type="checkbox" /></label>
                 <label class="setting"><span class="setting-text"><b>Mention Chat On Steroids Core</b><em>Makes sure ChatGPT can use this app in every chat. Turn it off if ChatGPT starts plain questions with an unneeded tool call. Workers, Goal, Loop and Continue always keep the mention.</em></span><input id="mentionCore" type="checkbox" /></label>
               </div>
             </section>
@@ -824,6 +825,17 @@
                       />
                       <p class="hint is-warn" id="connectorSuffixError" role="alert" hidden>Use up to 32 letters, digits, spaces, dots, dashes or underscores.</p>
                       <p class="hint" id="connectorSuffixHint">Each computer needs its own plugins in ChatGPT, and they can't share a name. “Windows” names this computer's plugins “Chat On Steroids Core (Windows)” and so on. After changing it, rename this computer's plugins to match: in ChatGPT, open Settings → Plugins, select each one and edit its app name.</p>
+                    </div>
+                  </details>
+                  <!-- #1495: a workspace member without admin rights can neither add a custom app nor
+                       see the workspace's Platform organization; say whom to ask and for what. -->
+                  <details class="setup-optional step-wide" id="workspaceMemberHelp">
+                    <summary><svg class="disclosure-chevron details-chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3.5 10.5 8 6 12.5"></path></svg>ChatGPT workspace without admin rights <span class="tag is-optional">optional</span></summary>
+                    <div class="field workspace-member-help">
+                      <p class="hint">In Business, Enterprise and Edu workspaces, admins decide who may add custom apps. If Plugins offers no way to add a custom MCP server, ask a workspace admin to add the Core plugin with the name, description and tunnel ID shown here.</p>
+                      <p class="hint">The tunnel must belong to your workspace's organization on platform.openai.com. If Platform only shows your Personal organization, ask an admin to invite you to that organization, or to create the tunnel and a restricted key (Tunnels: Read and Use) for you.</p>
+                      <p class="hint">A Cloudflare quick tunnel gets a new URL on every start, so an admin would have to update the plugin each time. A tunnel ID stays the same, and so does your own HTTPS tunnel with Keep plugin URLs across restarts (Settings → General → For developers).</p>
+                      <p class="hint">Anyone who can use the plugin can use this computer within the permissions you chose. Where the workspace allows it, ask the admin to make the plugin available only to you.</p>
                     </div>
                   </details>
                   <div class="connectors step-wide" id="connectorCards"></div>
@@ -1466,7 +1478,7 @@
             <div class="update-readiness-status">
               <div class="update-readiness-header">
                 <button class="btn update-readiness-toggle" id="updateReadinessToggle" type="button" aria-controls="updateReadinessDetails" aria-expanded="true">
-                  <span class="update-readiness-caret" aria-hidden="true">▸</span><span id="updateReadinessSummary">Not checked yet</span>
+                  <svg class="disclosure-chevron update-readiness-caret" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3.5 10.5 8 6 12.5"></path></svg><span id="updateReadinessSummary">Not checked yet</span>
                 </button>
                 <button class="btn btn-solid" id="updateAll" type="button" aria-describedby="updateAllNotice" title="You will be asked before the app restarts. Finish active work before installing.">Update all</button>
               </div>
@@ -1474,7 +1486,7 @@
               <p id="updateAllError" class="is-warn" role="alert" hidden></p>
             </div>
             <details id="updateReadinessDetails" open>
-              <summary>Component details</summary>
+              <summary><svg class="disclosure-chevron details-chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3.5 10.5 8 6 12.5"></path></svg>Component details</summary>
               <p class="muted">App, browser extension and plugins in ChatGPT.</p>
               <ul id="updateReadinessRows"></ul>
               <p class="muted">Your settings are kept. Manual steps appear in the status list.</p>

@@ -292,6 +292,26 @@ it('reads a DIL answer as the model wrote it, without the escapes its fallback a
   expect(await read('```python\nx = a[0] ** 2  # note \\[\n```\n\n`C:\\Users\\[x]` and \\_after\\_'))
     .toBe('```python\nx = a[0] ** 2  # note \\[\n```\n\n`C:\\Users\\[x]` and _after_');
 });
+it('decodes the entities a DIL fallback writes for | and & in plain text, once', async () => {
+  // Measured on GPT-6 (2026-10-16): the model wrote `a|b <c> &d \\e *f*` and the fallback held
+  // `a&#124;b \\<c> &amp;d \\\\e \\*f\\*`, the code span verbatim. Readers saw &#124; and &amp;.
+  const f = fixture();
+  const answer = f.entry.turn.items[2];
+  answer.content = `::chatgpt-content-reference{index="0" source_message_id="${ANSWER}"}`;
+  const read = async (fallbackMarkdown: string) => {
+    answer.contentReferences = [{ type: 'dil', source_message_id: ANSWER, model_dil_v2: { fallbackMarkdown } }];
+    return (await f.ask()).turns[0].messages.find((m: any) => m.rawMessageId === ANSWER).rawText;
+  };
+  expect(await read('a&#124;b \\<c> &amp;d \\\\e \\*f\\*\n`a|b <c> &d \\e *f*`\nEND'))
+    .toBe('a|b <c> &d \\e *f*\n`a|b <c> &d \\e *f*`\nEND');
+  expect(await read('KIWI &#124; /home/maxim/cos-ssh-live')).toBe('KIWI | /home/maxim/cos-ssh-live');
+  // A literal entity the model wrote has its & encoded, so one pass gives back the literal text.
+  expect(await read('Write &amp;#124; or &amp;amp; or &amp;lt;b&amp;gt; &#x7C; &#X7c;')).toBe('Write &#124; or &amp; or &lt;b&gt; | |');
+  // Code and formulas keep their own text.
+  expect(await read('`x &amp; y` and \\(a &amp; b\\)')).toBe('`x &amp; y` and \\(a &amp; b\\)');
+  // Not an entity: left as it is.
+  expect(await read('R&D, a & b, &nope; &#;')).toBe('R&D, a & b, &nope; &#;');
+});
 it('keeps the LaTeX of a DIL answer as written, while its plain text still loses the escapes (#1342)', async () => {
   // Recorded from GPT-6 on 2026-10-12. The fallback escapes plain text only: a display formula is a
   // block between a line "\\[" and a line "\\]", an inline one sits in \\( … \\), and both hold raw
@@ -309,7 +329,7 @@ it('keeps the LaTeX of a DIL answer as written, while its plain text still loses
   // Literal punctuation around formulas, a one-line formula ChatGPT made a block, and $$ … $$, which
   // ChatGPT itself treats as plain text.
   expect(await read("The RPA (random phase approximation) costs \\$5 or \\$10, see \\[note 1\\] and {braces} and 50% of a&#124;b, x = 1, a+b, \\#tag, \\~wave\\~.\n\\(x\\), \\(n=2\\) and \\(\\alpha+\\beta\\)\\.\n\n\\[\nE = mc^2\n\\]\n\n\\$\\$\n\\\\int\\_0\\^\\\\infty e\\^,dx = \\\\frac}2\n\\$\\$"))
-    .toBe("The RPA (random phase approximation) costs $5 or $10, see [note 1] and {braces} and 50% of a&#124;b, x = 1, a+b, #tag, ~wave~.\n\\(x\\), \\(n=2\\) and \\(\\alpha+\\beta\\).\n\n\\[\nE = mc^2\n\\]\n\n$$\n\\int_0^\\infty e^,dx = \\frac}2\n$$");
+    .toBe("The RPA (random phase approximation) costs $5 or $10, see [note 1] and {braces} and 50% of a|b, x = 1, a+b, #tag, ~wave~.\n\\(x\\), \\(n=2\\) and \\(\\alpha+\\beta\\).\n\n\\[\nE = mc^2\n\\]\n\n$$\n\\int_0^\\infty e^,dx = \\frac}2\n$$");
   // An opening without its closing is not a formula: the text is unescaped as before.
   expect(await read('Odd \\( left open and \\[ too')).toBe('Odd ( left open and [ too');
   expect(await read('\\[\nnever closed \\_here\\_')).toBe('[\nnever closed _here_');
@@ -1185,6 +1205,43 @@ it('names no unrendered user message for a stale or foreign stamp', async () => 
   expect(named()).toEqual([]);
 });
 
+// 2.1.41 release round and #1662, Windows: in a chat's later turns ChatGPT keeps a message sent
+// into the running answer (a fresh-turn continue, or the person's own follow-up) in the same
+// exchange as the question it followed, as its own user slot. The whole exchange was skipped as
+// ambiguous, so the fresh turn's answer was never read and its turn never ended (stalled after
+// ten minutes). Distinct slots are distinct questions; only a duplicated slot stays ambiguous.
+it('reads an exchange whose later message was sent into the running answer', async () => {
+  const f = fixture();
+  f.entry.turn.status = 'complete';
+  const second = addExchange(f, 2, 'Second question');
+  const interim = '99999999-1111-4111-8111-000000000024', steered = '99999999-1111-4111-8111-000000000025';
+  const [question, answer] = second.entry.turn.items;
+  second.entry.turn.items = [question!,
+    { type: 'assistant-message', messageId: interim, content: 'Running step two', phase: 'commentary', completed: true } as any,
+    { type: 'user-message', messageId: steered, serverMessageId: steered, message: 'Continue the task from where you are.' } as any,
+    answer!];
+  second.entry.turn.messageIds = [second.userId, interim, steered, second.answerId];
+  const node = f.doc.querySelectorAll('[data-turn-key]')[1]!;
+  const turnKey = second.entry.id;
+  const slots = node.querySelector('[data-content-search-turn-key]')!;
+  slots.querySelector(`[data-content-search-unit-key="${turnKey}:1:assistant"]`)!.setAttribute('data-content-search-unit-key', `${turnKey}:3:assistant`);
+  const interimSlot = f.doc.createElement('div');
+  interimSlot.setAttribute('data-content-search-unit-key', `${turnKey}:1:assistant`);
+  interimSlot.innerHTML = '<div data-markdown-text-style="assistant-message">Running step two</div>';
+  const steeredSlot = f.doc.createElement('div');
+  steeredSlot.setAttribute('data-content-search-unit-key', `${turnKey}:2:user`);
+  steeredSlot.innerHTML = '<div data-user-message-bubble><div class="whitespace-pre-wrap">Continue the task from where you are.</div></div>';
+  slots.querySelector(`[data-content-search-unit-key="${turnKey}:0:user"]`)!.after(interimSlot, steeredSlot);
+  const thread = f.chain({ entries: [f.entry, second.entry] }, f.top);
+  f.row.return = thread;
+  (node as any).__reactFiber$fixture = f.chain({ entry: second.entry }, thread);
+  await f.ask();
+  const roles = f.api.turns().map((turn: any) => turn.role);
+  expect(roles).toEqual(['user', 'assistant', 'user', 'user', 'assistant']);
+  const users = f.api.messages().filter((m: any) => m.role === 'user').map((m: any) => m.id);
+  expect(users).toEqual([USER, second.userId, steered]);
+});
+
 it('still refuses an exchange whose user slot is ambiguous (#910)', () => {
   const f = fixture();
   const exchange = f.doc.querySelector('[data-turn-key]')!;
@@ -1635,4 +1692,52 @@ it('reports an app sighting for a shell result outside the turn\'s message ids, 
     metadata: { request_id: 'another-turns-request', invoked_resource: { app_name: 'Gmail', resource_uri: '/asdk_app_gmail/link_g/search' } } } };
   const turn = (await f.ask()).turns[0];
   expect(turn.sightings).toEqual([{ requestId: OTHER, appId: 'asdk_app_x1', linkId: 'link_x', appName: 'Chat On Steroids Core' }]);
+});
+
+// Edit & resubmit (#365): the shell model has no parent ids. A question follows the previous turn's
+// last message in the thread's ordered entries (the first follows the root), and only ChatGPT's own
+// versions control proves that two questions with the same place are versions of one message.
+// 2.1.41 release round, Windows: a message sent into the running answer (a fresh-turn continue, or
+// a person's own follow-up) sits in the same shell turn as the question it followed. Given that
+// turn's place, it looked like a second version of the question, and Edit & resubmit folded the
+// person's question away as "Earlier version". It follows the message before it in its own turn.
+it('places a message sent into a running turn after the message it followed, not beside the turn\'s question', async () => {
+  const f = fixture();
+  f.entry.turn.status = 'complete';
+  const second = addExchange(f, 2, 'Second question');
+  const interim = '99999999-1111-4111-8111-000000000024', steered = '99999999-1111-4111-8111-000000000025';
+  const [question, answer] = second.entry.turn.items;
+  second.entry.turn.items = [question!,
+    { type: 'assistant-message', messageId: interim, content: 'Running step two', phase: 'commentary', completed: true } as any,
+    { type: 'user-message', messageId: steered, serverMessageId: steered, message: 'Continue the task from where you are.' } as any,
+    answer!];
+  second.entry.turn.messageIds = [second.userId, interim, steered, second.answerId];
+  const thread = f.chain({ entries: [f.entry, second.entry] }, f.top);
+  f.row.return = thread;
+  const secondNode = f.doc.querySelectorAll('[data-turn-key]')[1] as any;
+  secondNode.__reactFiber$fixture = f.chain({ entry: second.entry }, thread);
+  const questions = (await f.ask()).turns.flatMap((turn: any) => turn.messages.filter((m: any) => m.role === 'user')
+    .map((m: any) => [m.rawMessageId, m.parentId, m.parentExact]));
+  expect(questions).toEqual([[USER, 'root', false], [second.userId, ANSWER, true], [steered, interim, true]]);
+});
+
+it('places each question in ChatGPT\'s message tree, with the versions control as proof of an edit', async () => {
+  const f = fixture();
+  f.entry.turn.status = 'complete';
+  const second = addExchange(f, 2, 'Second question');
+  const thread = f.chain({ entries: [f.entry, second.entry] }, f.top);
+  f.row.return = thread;
+  const secondNode = f.doc.querySelectorAll('[data-turn-key]')[1] as any;
+  secondNode.__reactFiber$fixture = f.chain({ entry: second.entry }, thread);
+  const questions = async () => (await f.ask()).turns.flatMap((turn: any) => turn.messages.filter((m: any) => m.role === 'user')
+    .map((m: any) => [m.rawMessageId, m.parentId, m.parentExact]));
+  // After a real message, the place alone proves versions; at the root only ChatGPT's versions control does.
+  expect(await questions()).toEqual([[USER, 'root', false], [second.userId, ANSWER, true]]);
+  const versions = f.doc.createElement('button');
+  (versions as any).__reactFiber$fixture = f.chain({ onClick: () => ({ conversationId: THREAD, messageId: USER, usesVersionsEndpoint: !0 }) });
+  f.doc.querySelector('[data-turn-key]')!.querySelector('[data-content-search-turn-key]')!.append(versions);
+  expect(await questions()).toEqual([[USER, 'root', true], [second.userId, ANSWER, true]]);
+  // A turn the thread list does not hold exactly once gives no place at all.
+  thread.memoizedProps.entries = [f.entry];
+  expect((await questions()).find(([id]: any) => id === second.userId)?.[1]).toBeUndefined();
 });

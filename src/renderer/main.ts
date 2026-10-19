@@ -1,5 +1,7 @@
 import { initBrowserSetup } from './setup-browser.js';
-import { currentLanguage, ui, uiText, t, initLanguage, onLanguageChange } from './i18n.js';
+import { currentLanguage, ui, uiText, t, tn, initLanguage, onLanguageChange } from './i18n.js';
+import { primaryShiftShortcut, primaryShortcut } from './shortcuts.js';
+import { desktopAccessProblem, paintDesktopAccessNotice } from './desktop-access-notice.js';
 import { chatgptNameLine } from './connector-name.js';
 import { CONNECTOR_SUFFIX_MAX, CONNECTOR_SUFFIX_PATTERN } from '../shared/connector-names.js';
 import { displayLocalServer } from './local-url.js';
@@ -71,6 +73,10 @@ const api = window.api;
 // First: main announces a Keychain read before it starts and may not get through again until it ends.
 initKeychainNotice(api);
 initLanguage();
+// Composer key hints name this computer's keys only: a Windows user never reads ⌘ first.
+ui($('followUpHint'), 'textContent', () => t('What a message you send while ChatGPT works does by default. {0} sends it the other way.', [primaryShiftShortcut(t('Enter'))]));
+ui($('enterSendsHint'), 'textContent', () => t('Which key sends what you type. With {0}, Enter starts a new line.', [primaryShortcut(t('Enter'))]));
+ui($('enterSendsModifier'), 'textContent', () => primaryShortcut(t('Enter')));
 let pluginRefreshResetBusy = false;
 let pluginRefreshResetFailed = false;
 function paintPluginRefreshRecovery(next: AppState): void {
@@ -341,7 +347,6 @@ $('sidebarPets').addEventListener('click', () => showTab('pets'));
 $('sidebarSkills').addEventListener('click', () => showTab('skills'));
 api.onPetOverlayOpenOwner(screen => showTab(screen));
 $('addProject').addEventListener('click', () => showTab('chat'));
-$('composerFolder').addEventListener('click', () => $('addProject').click());
 let zoomFactor = 1;
 let zoomEdited = false;
 void api.getZoom().then(result => {
@@ -601,8 +606,8 @@ function paintGroups(): void {
         : on.length === 0
           ? t('off')
           : on.length === group.caps.length
-            ? t(on.length === 1 ? '{0} permission' : '{0} permissions', [on.length])
-            : t("{0} of {1} permissions", [on.length, group.caps.length]));
+            ? tn('{0} permission', '{0} permissions', on.length)
+            : tn("{0} of {1} permission", "{0} of {1} permissions", group.caps.length, [on.length, group.caps.length]));
 
     root.classList.toggle('is-on', on.length > 0);
     root.classList.toggle('is-locked', usable.length === 0);
@@ -645,15 +650,26 @@ function paintDesktopAccess(next: AppState): void {
   box.hidden = missing.length === 0;
   if (box.hidden) return;
 
+  const problem = desktopAccessProblem(next);
+  const stale = problem?.stale === true;
+  // Repair resets only this app's own entry and asks again, so it is safe whether or not an
+  // earlier grant is remembered; the first version that remembers grants knows of none.
+  const repairable = problem?.missing === true;
   ui($('desktopAccessTitle'), 'textContent', () => t("Desktop access needs attention"));
   ui($('desktopAccessDetail'), 'textContent', () => t("{0}. These are live verdicts from the native backend executing inside Chat On Steroids. ", [missing.join(' · ')]) +
-    t("Grant the missing macOS permission, then fully quit and reopen the app."));
+    (stale
+      ? t("macOS still shows Chat On Steroids as allowed, but that permission belongs to an earlier version: without a developer signature, every update is a new app to macOS. Choose Repair permissions, allow it when macOS asks, then fully quit and reopen the app.")
+      : repairable
+        ? t("Choose Repair permissions and allow it when macOS asks, then fully quit and reopen the app. Repair also fixes a permission that System Settings shows as allowed but that no longer applies after an update.")
+        : t("Grant the missing macOS permission, then fully quit and reopen the app.")));
+  $<HTMLButtonElement>('repairDesktopAccess').hidden = !repairable;
   $<HTMLButtonElement>('openDesktopScreen').hidden =
     !needsScreen || access.screen === 'granted';
   $<HTMLButtonElement>('openDesktopAccessibility').hidden =
     !needsAccessibility || access.accessibility === 'granted';
+  // Repair asks for Accessibility again itself; a second request button would only compete with it.
   $<HTMLButtonElement>('requestDesktopAccessibility').hidden =
-    !needsAccessibility || access.accessibility === 'granted';
+    !needsAccessibility || access.accessibility === 'granted' || repairable;
 }
 
 /**
@@ -747,6 +763,7 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?:
       playfulContinue: $<HTMLInputElement>('playfulContinue').checked,
       followOutput: $<HTMLInputElement>('followOutput').checked,
       mentionCore: $<HTMLInputElement>('mentionCore').checked,
+      mentionPlugins: $<HTMLInputElement>('mentionPlugins').checked,
       privacyScreenshots: $<HTMLInputElement>('privacyScreenshots').checked,
       theme: over.theme ?? previous.ui.theme,
       appearance: over.appearance ?? previous.ui.appearance
@@ -1254,7 +1271,7 @@ function updateSummary({ bridge, update, config, status }: AppState): { text: st
   }
   if (stale) {
     // Firefox runs the add-on Mozilla signed and updates it itself; the app's folder is not what it loads.
-    const firefox = bridge.externalExtension?.engine === 'gecko' && bridge.externalExtension.version === stale;
+    const firefox = bridge.extensionEngine === 'gecko' || (bridge.externalExtension?.engine === 'gecko' && bridge.externalExtension.version === stale);
     lines.push(
       t("Update your browser extension: {0} → {1}. ", [stale, update.current]) +
         (firefox
@@ -1630,6 +1647,7 @@ function apply(next: AppState): void {
   readCommandAllowlist();
   paintGroups();
   paintDesktopAccess(next);
+  paintDesktopAccessNotice(next, { repair: () => void repairDesktopAccess(), open: () => showTab('home') });
 
   // ---- folders
   paintRoots(config.roots);
@@ -1718,6 +1736,7 @@ function apply(next: AppState): void {
   applyChecked($<HTMLInputElement>('playfulContinue'), config.ui.playfulContinue === true, previousState?.config.ui.playfulContinue);
   applyChecked($<HTMLInputElement>('followOutput'), config.ui.followOutput !== false, previousState?.config.ui.followOutput);
   applyChecked($<HTMLInputElement>('mentionCore'), config.ui.mentionCore !== false, previousState?.config.ui.mentionCore);
+  applyChecked($<HTMLInputElement>('mentionPlugins'), config.ui.mentionPlugins === true, previousState?.config.ui.mentionPlugins);
   applyChecked($<HTMLInputElement>('controlApiEnabled'), config.controlApi?.enabled === true, previousState?.config.controlApi?.enabled);
   applyChecked($<HTMLInputElement>('mcpPersistentUrls'), config.mcp?.persistentUrls === true, previousState?.config.mcp?.persistentUrls);
   // Stable URLs live only in the OS-backed secret store; without it they keep rotating.
@@ -1901,8 +1920,8 @@ function apply(next: AppState): void {
   progress.setAttribute('aria-valuenow', String(finished));
   progress.classList.toggle('is-complete', finished === shown.length);
   ui($('setupProgressText'), 'textContent', () => finished === shown.length
-    ? t('All {0} steps done', [shown.length])
-    : t('{0} of {1} steps done', [finished, shown.length]));
+    ? tn('{0} step done', 'All {0} steps done', shown.length)
+    : tn('{0} of {1} step done', '{0} of {1} steps done', shown.length, [finished, shown.length]));
 
   // One step open at a time: the one the user picked, else the first unfinished. Past the last
   // task comes Ready, which reads every check back, so a finished setup opens on its proof.
@@ -2337,7 +2356,7 @@ function paintProblems(): void {
   for (const id of ['homeProblems', 'logProblems']) {
     const badge = $(id);
     badge.hidden = problems === 0;
-    ui(badge, 'textContent', () => t(problems === 1 ? '{0} problem' : '{0} problems', [problems]));
+    ui(badge, 'textContent', () => tn('{0} problem', '{0} problems', problems));
   }
 }
 
@@ -2557,6 +2576,16 @@ async function runChecks(): Promise<void> {
 }
 
 $('runChecks').addEventListener('click', () => void runChecks());
+async function repairDesktopAccess(): Promise<void> {
+  for (const id of ['repairDesktopAccess', 'desktopAccessNoticeRepair']) $<HTMLButtonElement>(id).disabled = true;
+  try {
+    const next = await run(api.repairDesktopAccess());
+    if (next) apply(next);
+  } finally {
+    for (const id of ['repairDesktopAccess', 'desktopAccessNoticeRepair']) $<HTMLButtonElement>(id).disabled = false;
+  }
+}
+$('repairDesktopAccess').addEventListener('click', () => void repairDesktopAccess());
 $('requestDesktopAccessibility').addEventListener('click', async () => {
   const button = $<HTMLButtonElement>('requestDesktopAccessibility');
   button.disabled = true;
@@ -2824,6 +2853,7 @@ for (const id of [
   'enterSends',
   'turnNotifications',
   'mentionCore',
+  'mentionPlugins',
   'controlApiEnabled',
   'controlApiAllowActions',
   'mcpPersistentUrls',

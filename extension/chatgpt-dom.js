@@ -615,6 +615,21 @@ var CLF_DOM = (() => {
     if (!turn || !stamp?.startsWith(`${turn}:`)) return null;
     try { return decodeURIComponent(stamp.slice(turn.length + 1)) || null; } catch { return null; }
   }
+  /**
+   * Whether the page shows exactly one exchange, the chat's first, running without its question
+   * (fiber.js `data-clf-fiber-first`), and no user message anywhere. The stamp counts only under
+   * the exchange's current turn stamp, like every other MAIN stamp; a stale one is no evidence.
+   */
+  function firstQuestionPending() {
+    return safe(() => {
+      const all = turns();
+      if (all.length !== 1 || all[0].role !== 'assistant' || messages().some(message => message.role === 'user')) return false;
+      const section = all[0].node;
+      if (!section?.matches?.(SHELL_TURN)) return false;
+      const turn = section.getAttribute('data-clf-fiber-turn'), stamp = section.getAttribute('data-clf-fiber-first');
+      return !!turn && stamp === turn;
+    }, false);
+  }
   function turns() {
     return safe(() => {
       const out = [];
@@ -2831,7 +2846,7 @@ var CLF_DOM = (() => {
     const route = /^#settings\/Plugins\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(location.hash) ||
       (!location.hash ? /^\/(?:settings\/plugins-settings|plugins)\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(location.pathname) : null);
     if (!snapshot || snapshot.appId !== route?.[1] || (expectedAppId ? snapshot.appId !== expectedAppId : !ownSnapshot(snapshot, connectorName)) ||
-        !Array.isArray(snapshot.tools) || (snapshot.tools.length < 1 && !externalPlugins) || snapshot.tools.length > (externalPlugins ? 257 : 16) || JSON.stringify(snapshot.tools).length > 300000 ||
+        !Array.isArray(snapshot.tools) || (snapshot.tools.length < 1 && !externalPlugins) || snapshot.tools.length > (externalPlugins ? 257 : 64) || JSON.stringify(snapshot.tools).length > 300000 ||
         snapshot.tools.some(tool => !tool || typeof tool.name !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(tool.name) || typeof tool.description !== 'string' || tool.inputSchema?.type !== 'object') ||
         new Set(snapshot.tools.map(tool => tool.name)).size !== snapshot.tools.length) return null;
     const buttons = [...document.querySelectorAll('button[data-clf-plugin-refresh]')].filter(button => button.getAttribute('data-clf-plugin-refresh') === snapshot.appId && button.getClientRects().length > 0);
@@ -3742,6 +3757,7 @@ var CLF_DOM = (() => {
     turns,
     presentationTurns,
     messages,
+    firstQuestionPending,
     messagesIn,
     sectionSignature,
     generating,

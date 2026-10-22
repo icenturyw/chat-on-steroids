@@ -7,7 +7,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { loadSurfaceTokens, rememberSurfaceTokens } from './mcp/persistent-paths.js';
+import { loadKeptPort, loadSurfaceTokens, rememberSurfaceTokens } from './mcp/persistent-paths.js';
 import { connectorProof } from './connector-proof.js';
 import type { ConnectionState, ConnectionStatus, SurfaceStatus, TunnelSettings } from '../shared/types.js';
 import { requiresApprovedFilesystemRoot } from '../shared/capabilities.js';
@@ -478,6 +478,11 @@ async function connectImpl(current: () => boolean = () => true): Promise<void> {
     const surfaceTokens = namedCloudflare
       ? await persistentMcpPathTokens()
       : keepUrls ? await loadSurfaceTokens().catch(() => ({})) : {};
+    // Cloudflare's published hostname already points at cloudflareLocalPort. Other
+    // transports reuse the opt-in kept port so a tunnel of the user's own can find it.
+    const keptPort = cloudflare
+      ? cloudflarePort
+      : keepUrls ? await loadKeptPort().catch(() => null) : null;
     if (shutdownRequested || generation !== connectionGeneration) {
       return;
     }
@@ -495,14 +500,13 @@ async function connectImpl(current: () => boolean = () => true): Promise<void> {
             privacyScreenshots: live.ui.privacyScreenshots
           };
         },
-        cloudflare
-          ? {
-              port: cloudflarePort,
-              ...(namedHostname ? { publicHostname: namedHostname } : {}),
-              surfaceTokens,
-              onRequest: liveRequest
-            }
-          : { surfaceTokens, onRequest: liveRequest }
+        surfaceTokens,
+        {
+          ...(keptPort ? { port: keptPort } : {}),
+          ...(namedHostname ? { publicHostname: namedHostname } : {}),
+          onRequest: liveRequest,
+          ...(cloudflare ? { requirePort: true } : {})
+        }
       );
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
@@ -532,7 +536,11 @@ async function connectImpl(current: () => boolean = () => true): Promise<void> {
       await disconnectImpl();
       return;
     }
-    setStatus({ localUrl: endpoint.url, surfaces: describeSurfaces() });
+    setStatus({
+      localUrl: endpoint.url,
+      keptPortMoved: !cloudflare && keptPort && endpoint.port !== keptPort ? { from: keptPort, to: endpoint.port } : null,
+      surfaces: describeSurfaces()
+    });
     if (desktopAutomationSupported() && (caps.screen || caps.control)) void prewarmComputerHelper();
     updateSurface('core', { state: 'starting', detail: 'Connecting…' });
 
@@ -793,6 +801,7 @@ async function disconnectResources(endpointForceAfterMs?: number): Promise<void>
     detail: '',
     publicUrl: null,
     localUrl: null,
+    keptPortMoved: null,
     handshakeAt: null,
     health: null,
     surfaces: describeSurfaces()

@@ -274,20 +274,18 @@ export function forgetExposedSurface(): void {
 
 export async function startMcpServer(
   getContext: () => ToolContext,
-  supplied: {
+  kept: Partial<Record<SurfaceId, string>> = {},
+  options: {
     port?: number;
     publicHostname?: string;
-    surfaceTokens?: Partial<Record<SurfaceId, string>>;
     onRequest?: () => void;
-  } | Partial<Record<SurfaceId, string>> = {}
+    requirePort?: boolean;
+  } = {}
 ): Promise<McpEndpoint> {
-  // Accept upstream's direct token map as well as the custom fixed-tunnel options.
-  const options = ('core' in supplied || 'desktop' in supplied || 'plugins' in supplied)
-    ? { surfaceTokens: supplied as Partial<Record<SurfaceId, string>> }
-    : supplied as { port?: number; publicHostname?: string; surfaceTokens?: Partial<Record<SurfaceId, string>>; onRequest?: () => void };
-  // A bearer token in the path is what authorises callers. The connection layer normally
-  // supplies one stable token per surface from OS secure storage so a named-tunnel URL remains
-  // usable across restarts. If secure storage is unavailable, fall back to a per-run token.
+  // A per-session token in the path is what authorises callers. It is regenerated on
+  // every app start, so a URL that leaks stops working when the app restarts, unless the
+  // caller passes a stored token: named Cloudflare always does, and `mcp.persistentUrls`
+  // does for other transports. Only a well-formed token is used.
   requestSeenAt = null;
   surfaceRequestAt.clear();
   resetToolClock();
@@ -299,7 +297,7 @@ export async function startMcpServer(
   // Desktop" and "give me everything" the same act.
   const surfacePaths = SURFACE_IDS.map((id) => ({
     id,
-    basePath: `/mcp/${id}/${options.surfaceTokens?.[id] && /^[A-Za-z0-9_-]{43}$/.test(options.surfaceTokens[id]!) ? options.surfaceTokens[id] : randomBytes(32).toString('base64url')}`
+    basePath: `/mcp/${id}/${kept[id] && /^[A-Za-z0-9_-]{43}$/.test(kept[id]!) ? kept[id] : randomBytes(32).toString('base64url')}`
   }));
 
   // ChatGPT can keep a cached tools/list snapshot for the lifetime of a connector
@@ -507,13 +505,29 @@ export async function startMcpServer(
   server.requestTimeout = 300_000;
   server.maxRequestsPerSocket = 0;
 
-  await new Promise<void>((resolve, reject) => {
+  const listen = (port: number) => new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(options.port ?? 0, '127.0.0.1', () => {
+    server.listen(port, '127.0.0.1', () => {
       server.removeListener('error', reject);
       resolve();
     });
   });
+  // A kept port (a tunnel of the user's own points at it, #1550) when it is free; else any port.
+  // Retried briefly first: on a restart the previous instance may still be letting go of it.
+  // Cloudflare's published hostname already points at a configured port (`requirePort`):
+  // falling back would silently break that route, so occupation stays an error.
+  let listening = false;
+  for (let tries = 1; options.port && !listening; tries += 1) {
+    try { await listen(options.port); listening = true; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EADDRINUSE' && tries < 5) { await new Promise(resolve => setTimeout(resolve, 200)); continue; }
+      if (options.requirePort) throw error;
+      logWarn(`Local port ${options.port} is not available (${code ?? (error as Error).message}); using another one, so a tunnel pointing at it needs the new port`);
+      break;
+    }
+  }
+  if (!listening) await listen(0);
 
   const address = server.address();
   if (address === null || typeof address === 'string') {

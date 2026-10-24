@@ -40,6 +40,7 @@ import { getConfig } from '../config.js';
 import { logError, logInfo, logWarn } from '../logger.js';
 import { buildServer, resetToolClock, type ToolContext } from './tools.js';
 import { SURFACE_IDS, configuredConnectorName, type SurfaceId } from './surfaces.js';
+import { noteRouteRequestArrived } from '../tunnel/route-settle.js';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
@@ -454,6 +455,7 @@ export async function startMcpServer(
     // OpenAI session key which remains usable when the request id is absent.
     const requestId = requestIdFromHeader(req.headers['x-request-id']);
     const openAiSession = openAiSessionFromHeader(req.headers['x-openai-session']);
+    if (requestId) noteRouteRequestArrived(requestId);
     const dispatch = (body?: unknown): void => {
       if (stopping || res.destroyed) {
         if (!res.destroyed) {

@@ -32,6 +32,7 @@ import { stageInputAttachment, stageInputAttachments, type AttachmentSource } fr
 import { recordDeliveredInput, recordedInputImage } from './session/input-history.js';
 import { UI_BASE_ZOOM, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
 import { usageOverview } from './session/usage.js';
+import { exportUsageCsv } from './session/usage-export.js';
 import { readProviderUsage } from './provider-usage.js';
 import { inputArgs, listInputs, editQueuedInput, sendQueuedInputNow, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
 import { draftOpeningMessage, onGoalChange, nativeGoalFailure } from './goal.js';
@@ -96,7 +97,7 @@ import type { WorkerWorktreeCleanupOffer } from '../shared/session.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { inFlightToolCalls } from './mcp/call-context.js';
 import { RESERVED_ROOT_NAMES, uniqueRootName, validateNewRoot, SandboxError, resolvePath } from './sandbox.js';
-import { addProject, addRemoteProject, expireArmedProjectCreates, getSessionProject, listProjects, localProjectPath, onProjectLinkChange, projectWorkspace, removeProject, retryProjectCreate, setProjectColor } from './projects.js';
+import { addProject, addRemoteProject, expireArmedProjectCreates, getSessionProject, listProjects, localProjectPath, onProjectLinkChange, projectWorkspace, removeProject, retryProjectCreate, setProjectColor, setProjectSecretsShieldOff } from './projects.js';
 import { createProjectEntry, listProjectDirectory, previewProjectFile, projectFileTarget, renameProjectEntry, revalidateProjectFileTarget, saveProjectTextFile, serverFileSnapshot } from './project-files.js';
 import { ProjectFileWatchSet } from './project-file-watcher.js';
 import { ProjectGitWatchSet, readProjectGitDiff, readProjectGitSnapshot } from './project-git.js';
@@ -144,6 +145,7 @@ import { findInSession, locateMessage, locateSearchMatch, searchSessions } from 
 import { listBookmarks, setBookmark } from './session/bookmarks.js';
 import { readSessionEvents, readSessionList, sessionListCursorSchema } from './session/read-model.js';
 import { exportSessionMarkdown } from './session/markdown-export.js';
+import { saveCodeFile } from './code-file.js';
 import { blockedChatIds, setChatsBlocked } from './session/blocked-chats.js';
 import { setChatsTrusted, trustedChatIds } from './session/trusted-chats.js';
 import {
@@ -246,6 +248,7 @@ const settingsPatch = z.object({
     developerMode: z.boolean().optional(),
     playfulStatus: z.boolean().optional(),
     playfulContinue: z.boolean().optional(),
+    announceTurns: z.boolean().optional(),
     customContinue: z.string().trim().max(CUSTOM_CONTINUE_MAX_CHARS).optional(),
     followOutput: z.boolean().optional(),
     mentionCore: z.boolean().optional(),
@@ -278,6 +281,7 @@ const settingsPatch = z.object({
     keepAwake: z.boolean().optional(),
     keepScreenAwake: z.boolean().optional(),
     privacyScreenshots: z.boolean(),
+    secretsShield: z.boolean().optional(),
     theme: z.enum(['light', 'dark'])
   }),
   sessions: z.object({
@@ -448,6 +452,7 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
       developerMode: pick(current.ui.developerMode, base.ui.developerMode, wanted.ui.developerMode),
       playfulStatus: pick(current.ui.playfulStatus, base.ui.playfulStatus, wanted.ui.playfulStatus),
       playfulContinue: pick(current.ui.playfulContinue, base.ui.playfulContinue, wanted.ui.playfulContinue),
+      announceTurns: pick(current.ui.announceTurns, base.ui.announceTurns, wanted.ui.announceTurns),
       // An emptied field means the built-in phrases again.
       customContinue: pick(current.ui.customContinue, base.ui.customContinue, wanted.ui.customContinue || undefined),
       followOutput: pick(current.ui.followOutput, base.ui.followOutput, wanted.ui.followOutput),
@@ -488,6 +493,8 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
         base.ui.privacyScreenshots,
         wanted.ui.privacyScreenshots
       ),
+      // Missing means on, here as in the saved settings.
+      secretsShield: pick(current.ui.secretsShield !== false, base.ui.secretsShield !== false, wanted.ui.secretsShield ?? current.ui.secretsShield !== false),
       theme: pick(current.ui.theme, base.ui.theme, wanted.ui.theme)
     },
     sessions: {
@@ -720,6 +727,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   });
   handle('usage:get', () => usageOverview());
   handle('usage:providers', (payload) => readProviderUsage({ fresh: z.object({ fresh: z.boolean() }).parse(payload).fresh }));
+  // The page sends only its divisor, so the file's tokens match the page; main reads the numbers.
+  handle('usage:export', (payload) => {
+    const request = z.object({ divisor: z.number().finite().positive() }).safeParse(payload);
+    if (!request.success) {
+      logWarn('usage export: refused, the page sent no positive, finite token divisor');
+      throw request.error;
+    }
+    return exportUsageCsv(request.data.divisor, getWindow());
+  });
   handle('plugin-refresh:reset', async () => {
     await resetPluginRefreshLedger();
     return buildState();
@@ -1068,6 +1084,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     push('session:changed');
     return project;
   });
+  handle('projects:secrets-shield', async payload => {
+    const { id, off } = z.object({ id: z.string().uuid(), off: z.boolean() }).strict().parse(payload);
+    const project = await setProjectSecretsShieldOff(id, off);
+    logInfo(`secrets shield: turned ${off ? 'off' : 'back on'} for a project's chats`);
+    push('session:changed');
+    return project;
+  });
   handle('projects:color', async payload => {
     const { id, color } = z.object({ id: z.string().uuid(), color: z.enum(PROJECT_COLORS).nullable() }).strict().parse(payload);
     const project = await setProjectColor(id, color);
@@ -1352,16 +1375,26 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     await clipboard.writeText(text);
     return true;
   });
+  // A code block's Save: a bare `name.ext` suggestion only, so no renderer value can point outside the dialog's choice.
+  handle('code:save', async (payload) => {
+    const { text, name } = z.object({
+      text: z.string().max(1_000_000),
+      name: z.string().regex(/^[a-z0-9-]{1,40}\.[a-z0-9]{1,8}$/i)
+    }).parse(payload);
+    return saveCodeFile(text, name, getWindow());
+  });
 
-  // Copy or save a completed turn's answer, or the session transcript, as Markdown. Main reads
-  // the full text of answers that were cut in the log, so neither comes out truncated.
+  // Copy or save a completed turn's answer, or the session transcript, as Markdown, or save the
+  // transcript as an HTML page. Main reads the full text of answers that were cut in the log, so
+  // none comes out truncated.
   handle('sessions:exportMarkdown', async (payload) => {
     const request = z.object({
       id: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
       scope: z.enum(['answer', 'latest', 'session']),
       turnId: z.string().min(1).max(200).optional(),
       messageId: z.string().min(1).max(200).optional(),
-      target: z.enum(['clipboard', 'file'])
+      target: z.enum(['clipboard', 'file']),
+      format: z.enum(['markdown', 'html']).optional()
     }).parse(payload);
     return exportSessionMarkdown(request, getWindow());
   });

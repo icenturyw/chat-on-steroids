@@ -55,6 +55,7 @@
 .ph.ph-chat-circle::before { content: '\e168'; }
 .ph.ph-check::before { content: '\e182'; }
 .ph.ph-check-circle::before { content: '\e184'; }
+.ph.ph-checks::before { content: '\e53a'; }
 .ph.ph-stop-circle::before { content: '\e46e'; }
 .ph.ph-clock::before { content: '\e19a'; }
 .ph.ph-copy::before { content: '\e1ca'; }
@@ -97,6 +98,7 @@
 .ph.ph-prohibit::before { content: '\e3de'; }
 .ph.ph-puzzle-piece::before { content: '\e596'; }
 .ph.ph-robot::before { content: '\e762'; }
+.ph.ph-shield-check::before { content: '\e40c'; }
 .ph.ph-sidebar-simple::before { content: '\ec24'; }
 .ph.ph-sliders-horizontal::before { content: '\e434'; }
 .ph.ph-sparkle::before { content: '\e6a2'; }

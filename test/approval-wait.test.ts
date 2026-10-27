@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  APPROVAL_ANSWER_MS, APPROVAL_FRESH_MS, APPROVAL_NOTICE_GRACE_MS, approvalAnswerFor, approvalCardView, approvalCardWaiting, approvalWaitingChats, noteApprovalCard,
+  APPROVAL_ANSWER_MS, APPROVAL_FRESH_MS, APPROVAL_GONE_MS, APPROVAL_NOTICE_GRACE_MS, approvalAnswerFor, approvalCardView, approvalCardWaiting, approvalWaitingChats, noteApprovalCard,
   requestApprovalAnswer, resetApprovalWaits, settleApprovalAnswer, type ApprovalWaitDeps
 } from '../src/main/approval-wait.js';
 import { APPROVAL_ANSWERED_TEXT, APPROVAL_WAITING_TEXT } from '../src/shared/approval-wait.js';
@@ -51,6 +51,66 @@ describe('approval card episodes', () => {
     await noteApprovalCard('chat', true, 'session', deps, 1_000 + APPROVAL_FRESH_MS + 5_000);
     expect(deps.rows.map(row => row[2])).toEqual([APPROVAL_WAITING_TEXT, APPROVAL_WAITING_TEXT]);
     expect(deps.rows[0]![1]).not.toBe(deps.rows[1]![1]);
+  });
+
+  it('takes back "answered" when the same card returns at once, so a redrawn card stays one request', async () => {
+    // VM, 2026-10-20: ChatGPT redrew the card; it was gone for 1.2 s. The chat said the approval
+    // was answered (nobody had answered) and showed the same request again below.
+    const card = { id: 'node-1', lines: ['Allow ChatGPT to use Chat On Steroids Core?', 'Start a worker.'], allow: true };
+    await noteApprovalCard('chat', true, 'session', deps, 1_000, card);
+    await noteApprovalCard('chat', true, 'session', deps, 1_000 + APPROVAL_NOTICE_GRACE_MS, card);
+    expect(deps.notices).toEqual(['session']);
+    await noteApprovalCard('chat', false, 'session', deps, 40_000);
+    await noteApprovalCard('chat', true, 'session', deps, 40_000 + APPROVAL_GONE_MS - 1, { ...card, id: 'node-2' });
+    const id = deps.rows[0]![1];
+    expect(deps.rows.every(row => row[1] === id)).toBe(true);
+    expect(deps.rows.at(-1)![2]).toBe(APPROVAL_WAITING_TEXT);
+    expect(deps.notices).toEqual(['session']);
+    expect(approvalCardWaiting('chat', 40_000 + APPROVAL_GONE_MS)).toBe(true);
+    expect(approvalCardView('chat', 40_000 + APPROVAL_GONE_MS)?.id).toBe('node-2');
+
+    // A real answer later still reads as answered.
+    await noteApprovalCard('chat', false, 'session', deps, 60_000);
+    expect(deps.rows.at(-1)![2]).toBe(APPROVAL_ANSWERED_TEXT);
+    expect(approvalCardWaiting('chat', 60_000)).toBe(false);
+  });
+
+  it('keeps an answer when a different card follows it, or the same one only after a while', async () => {
+    const first = { id: 'a', lines: ['Allow ChatGPT to use Chat On Steroids Core?', 'Run one command.'], allow: true };
+    const second = { id: 'b', lines: ['Allow ChatGPT to use Chat On Steroids Core?', 'Write one file.'], allow: true };
+    await noteApprovalCard('chat', true, 'session', deps, 1_000, first);
+    await noteApprovalCard('chat', false, 'session', deps, 2_000);
+    await noteApprovalCard('chat', true, 'session', deps, 3_000, second);
+    await noteApprovalCard('chat', false, 'session', deps, 4_000);
+    await noteApprovalCard('chat', true, 'session', deps, 4_000 + APPROVAL_GONE_MS, { ...second, id: 'c' });
+    const episodes = new Set(deps.rows.map(row => row[1]));
+    expect(episodes.size).toBe(3);
+    expect(deps.rows.filter(row => row[2] === APPROVAL_ANSWERED_TEXT)).toHaveLength(2);
+  });
+
+  it('takes over the row an earlier app run left waiting instead of adding another', async () => {
+    // VM, 2026-10-20: every restart while one card waited added a "waiting" row, five in the end.
+    const lookups: string[] = [];
+    deps.previous = async sessionId => {
+      lookups.push(sessionId);
+      return { progressId: 'approval-wait:chat:earlier-run', anchor: { seq: 3, time: 5 } };
+    };
+    await noteApprovalCard('chat', true, 'session', deps, 1_000);
+    expect(lookups).toEqual(['session']);
+    expect(deps.rows).toEqual([]);
+    await noteApprovalCard('chat', false, 'session', deps, 2_000);
+    expect(deps.rows).toEqual([['session', 'approval-wait:chat:earlier-run', APPROVAL_ANSWERED_TEXT, { seq: 3, time: 5 }]]);
+  });
+
+  it('starts its own row when the last one was answered, belongs to another chat, or is missing', async () => {
+    for (const previous of [null, { progressId: 'approval-wait:other-chat:1', anchor: { seq: 3, time: 5 } }]) {
+      resetApprovalWaits();
+      deps.rows.length = 0;
+      deps.previous = async () => previous;
+      await noteApprovalCard('chat', true, 'session', deps, 1_000);
+      expect(deps.rows.map(row => row[2])).toEqual([APPROVAL_WAITING_TEXT]);
+      expect(deps.rows[0]![1]).toMatch(/^approval-wait:chat:/);
+    }
   });
 
   it('holds recovery for a chat the app has not recorded, without a row or notice', async () => {
@@ -200,6 +260,34 @@ describe('the page detector', () => {
     expect(api.approvalCard()?.allow).toBe(false);
     main.innerHTML = '';
     expect(api.approvalCard()).toBeNull();
+  });
+
+  // Rows the live card may also produce: a term or value wrapped in its own div, two terms in a row,
+  // a term and a value in different rows, and a value too long to share a line with its label.
+  it('pairs a label only with the value of its own row, keeps wrapped parts together and never cuts a value', () => {
+    const long = 'v'.repeat(290);
+    dom.window.document.querySelector('main')!.innerHTML = `<div data-codex-approval-surface="true"><div role="alert"><dl>
+      <div class="grid"><dt><div>Ordner</div></dt><dd><div>C:/demo</div></dd></div>
+      <div class="grid"><dt>Schlüssel</dt><dd><div>Access</div><div>key</div></dd></div>
+      <div class="grid"><dt>Erster</dt><dt>Zweiter</dt><dd>Wert</dd></div>
+      <div class="grid"><dt>Allein</dt></div><div class="grid"><dd>Fremd</dd></div>
+      <div class="grid"><dt>Beschreibung lang</dt><dd>${long}</dd></div></dl></div>
+      <button>Ablehnen<kbd>Esc</kbd></button><button>Einmal zulassen<kbd>⏎</kbd></button></div>`;
+    expect(api.approvalCard()?.lines).toEqual(['Ordner: C:/demo', 'Schlüssel: Access key', 'Erster', 'Zweiter: Wert', 'Allein', 'Fremd', 'Beschreibung lang', long]);
+  });
+
+  // The live card on 2026-10-25 (German UI, a key-shaped value in the request) lists the shared data
+  // as a <dl>: a label and its value in one grid row. Read as one block they ran together into
+  // "Zugangsschlüsselsk-proj-…" in the app's copy of the card.
+  it('keeps a shared-data label and its value apart', () => {
+    dom.window.document.querySelector('main')!.innerHTML = `<div data-codex-approval-surface="true"><div role="alert">
+      <div>ChatGPT erlauben, Chat On Steroids Core zu verwenden?</div><div>Zu den geteilten Daten gehören:</div>
+      <dl class="@container"><div class="grid"><dt>Zugangsschlüssel</dt><dd><span class="min-w-0"><span>sk-proj-FAKE0123</span></span></dd></div>
+      <div class="grid"><dt>Befehl</dt><dd><span>echo test</span></dd></div>
+      <div class="grid"><dd>ohne Label</dd></div><div class="grid"><dt>Nur Label</dt></div></dl></div>
+      <button>Ablehnen<kbd>Esc</kbd></button><button>Einmal zulassen<kbd>⏎</kbd></button></div>`;
+    expect(api.approvalCard()?.lines).toEqual(['ChatGPT erlauben, Chat On Steroids Core zu verwenden?', 'Zu den geteilten Daten gehören:',
+      'Zugangsschlüssel: sk-proj-FAKE0123', 'Befehl: echo test', 'ohne Label', 'Nur Label']);
   });
 
   it('presses Deny or Allow once by their key hints, never the options menu, and only on that card', () => {

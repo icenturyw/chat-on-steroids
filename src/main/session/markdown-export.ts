@@ -1,23 +1,29 @@
-import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { app, clipboard, dialog, type BrowserWindow } from 'electron';
+import { app, clipboard, dialog, type BrowserWindow, type SaveDialogOptions } from 'electron';
 import type { StoredText } from '../../shared/session.js';
 import {
-  answerMarkdown, completedTurnIds, markdownFileName, messageAnswerEntries, sessionMarkdown, transcriptEntries, turnAnswerEntries
+  answerMarkdown, completedTurnIds, latestAnswer, markdownFileName, messageAnswerEntries, sessionMarkdown, transcriptEntries,
+  turnAnswerEntries
 } from '../../shared/markdown-export.js';
 import { getSession, readEvents, readOverflowText } from './store.js';
 import { providerEntitiesAsMarkdown } from '../../shared/content-reference.js';
 import { dialogLabel, mainText } from '../main-texts.js';
 import { completedDilText } from '../../shared/dil-tables.js';
+import { transcriptHtml } from '../../shared/html-export.js';
+import { redactSecretText } from '../redaction.js';
+import { replaceFile } from '../replace-file.js';
 
 export type MarkdownExportRequest = {
   id: string;
-  scope: 'answer' | 'session';
+  /** `latest` (/copy) is the chat's newest answer that offers copy, found here. */
+  scope: 'answer' | 'latest' | 'session';
   /** The completed turn whose answer is wanted; `answer` names this or `messageId`. */
   turnId?: string;
   /** An answer recorded outside any turn (copied branch history, an adopted chat's history). */
   messageId?: string;
   target: 'clipboard' | 'file';
+  /** `html` saves a whole session as one self-contained page; Markdown when left out. */
+  format?: 'markdown' | 'html';
 };
 
 export type MarkdownExportResult = { done: 'copied' } | { done: 'saved'; name: string } | { done: 'cancelled' };
@@ -34,34 +40,46 @@ async function fullText(sessionId: string, stored: StoredText, html?: StoredText
 export async function exportSessionMarkdown(request: MarkdownExportRequest, owner: BrowserWindow | null): Promise<MarkdownExportResult> {
   const summary = await getSession(request.id);
   if (!summary) throw new Error('Session not found');
+  const html = request.format === 'html';
+  if (html && (request.scope !== 'session' || request.target !== 'file')) throw new Error('HTML export saves a whole session to a file');
   const events = await readEvents(request.id);
   let markdown: string;
   let name: string;
-  if (request.scope === 'answer') {
+  if (request.scope !== 'session') {
+    const named = request.scope === 'latest' ? latestAnswer(events) : request;
+    if (!named) throw new Error('This chat has no finished answer yet');
+    const { turnId, messageId } = named;
     // Only a turn the page reported as completed has an answer to hand out; an answer recorded
     // outside any turn is final already, and is named by its message instead.
-    if (!request.messageId && (!request.turnId || !completedTurnIds(events).has(request.turnId))) throw new Error('This turn has not completed');
-    const entries = request.messageId ? messageAnswerEntries(events, request.messageId) : turnAnswerEntries(events, request.turnId!);
+    if (!messageId && (!turnId || !completedTurnIds(events).has(turnId))) throw new Error('This turn has not completed');
+    const entries = messageId ? messageAnswerEntries(events, messageId) : turnAnswerEntries(events, turnId!);
     if (!entries.length) throw new Error('This turn has no answer to export');
     markdown = answerMarkdown(await Promise.all(entries.map(entry => fullText(request.id, entry.stored, entry.html))));
     name = markdownFileName(summary.title, ' - answer');
   } else {
-    const entries = transcriptEntries(events);
-    markdown = sessionMarkdown(summary.title, await Promise.all(entries.map(async entry =>
-      ({ role: entry.role, text: await fullText(request.id, entry.stored, entry.html) }))));
-    name = markdownFileName(summary.title);
+    const entries = await Promise.all(transcriptEntries(events).map(async entry =>
+      ({ role: entry.role, text: await fullText(request.id, entry.stored, entry.html) })));
+    // A page is made to be passed on, so the credential shapes chat text can hold are masked in it.
+    const title = html ? redactSecretText(summary.title) : summary.title;
+    markdown = html
+      ? transcriptHtml(title, entries.map(entry => ({ role: entry.role, text: redactSecretText(entry.text) })),
+        { user: mainText('You'), assistant: 'ChatGPT' })
+      : sessionMarkdown(title, entries);
+    name = markdownFileName(title, '', html ? 'html' : 'md');
   }
   if (request.target === 'clipboard') {
     await clipboard.writeText(markdown);
     return { done: 'copied' };
   }
-  const options = {
-    ...dialogLabel('Export as Markdown'),
+  // Linux asks nothing about replacing a file unless told to.
+  const options: SaveDialogOptions = {
+    ...dialogLabel(html ? 'Export as HTML' : 'Export as Markdown'),
     defaultPath: path.join(app.getPath('downloads'), name),
-    filters: [{ name: mainText('Markdown files'), extensions: ['md'] }]
+    filters: [html ? { name: mainText('HTML files'), extensions: ['html'] } : { name: mainText('Markdown files'), extensions: ['md'] }],
+    properties: ['showOverwriteConfirmation']
   };
   const result = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
   if (result.canceled || !result.filePath) return { done: 'cancelled' };
-  await fs.writeFile(result.filePath, markdown, 'utf8');
+  await replaceFile(result.filePath, markdown, html ? 'HTML export' : 'Markdown export');
   return { done: 'saved', name: path.basename(result.filePath) };
 }

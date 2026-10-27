@@ -81,6 +81,20 @@ export function messageAnswerAnchors(events: readonly SessionEvent[]): Map<strin
   return anchors;
 }
 
+/** The chat's newest answer that offers copy (`/copy`): a completed turn's, or one recorded outside any turn. */
+export function latestAnswer(events: readonly SessionEvent[]): { turnId?: string; messageId?: string } | null {
+  const done = completedTurnIds(events);
+  // A turn can start again after it completed (the same request kept calling tools); it is open until it ends again.
+  const open = new Set<string>();
+  for (const event of events) {
+    if (event.kind === 'turn_start' && event.turnId) open.add(event.turnId);
+    else if (event.kind === 'turn_end' && event.turnId) open.delete(event.turnId);
+  }
+  const last = transcriptEntries(events)
+    .filter(entry => entry.role === 'assistant' && (entry.turnId ? done.has(entry.turnId) && !open.has(entry.turnId) : !!entry.messageId)).at(-1);
+  return !last ? null : last.turnId ? { turnId: last.turnId } : { messageId: last.messageId! };
+}
+
 /** The answer a turnless message holds, at its latest revision; none for a turn's own answer. */
 export function messageAnswerEntries(events: readonly SessionEvent[], messageId: string): TranscriptEntry[] {
   return transcriptEntries(events).filter(entry => entry.role === 'assistant' && !entry.turnId && entry.messageId === messageId);
@@ -103,9 +117,9 @@ export function sessionMarkdown(title: string, entries: readonly { role: 'user' 
 }
 
 /** A file name from a chat title that every desktop file system accepts. */
-export function markdownFileName(title: string, suffix = ''): string {
+export function markdownFileName(title: string, suffix = '', extension = 'md'): string {
   // The 80-unit limit must not leave half a surrogate pair in the saved filename.
   const base = title.normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim()
     .replace(/[. ]+$/, '').slice(0, 80).replace(/[\uD800-\uDBFF]$/, '').trim() || 'chat';
-  return `${base}${suffix}.md`;
+  return `${base}${suffix}.${extension}`;
 }

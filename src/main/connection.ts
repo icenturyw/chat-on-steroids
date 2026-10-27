@@ -7,7 +7,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { loadSurfaceTokens, rememberSurfaceTokens } from './mcp/persistent-paths.js';
+import { loadKeptPort, loadSurfaceTokens, rememberSurfaceTokens } from './mcp/persistent-paths.js';
 import { connectorProof } from './connector-proof.js';
 import type { ConnectionState, ConnectionStatus, SurfaceStatus, TunnelSettings } from '../shared/types.js';
 import { requiresApprovedFilesystemRoot } from '../shared/capabilities.js';
@@ -475,6 +475,7 @@ async function connectImpl(current: () => boolean = () => true): Promise<void> {
     // Existing named Cloudflare tunnels already use encrypted stable URL tokens. Preserve
     // those credentials so a deployed ChatGPT plugin does not silently lose its path.
     const keepUrls = getConfig().mcp?.persistentUrls === true;
+    const keptPort = keepUrls && !cloudflare ? await loadKeptPort().catch(() => null) : null;
     const surfaceTokens = namedCloudflare
       ? await persistentMcpPathTokens()
       : keepUrls ? await loadSurfaceTokens().catch(() => ({})) : {};
@@ -500,9 +501,10 @@ async function connectImpl(current: () => boolean = () => true): Promise<void> {
               port: cloudflarePort,
               ...(namedHostname ? { publicHostname: namedHostname } : {}),
               surfaceTokens,
+              fixedPort: true,
               onRequest: liveRequest
             }
-          : { surfaceTokens, onRequest: liveRequest }
+          : { ...(keptPort ? { port: keptPort } : {}), surfaceTokens, onRequest: liveRequest }
       );
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
@@ -532,7 +534,8 @@ async function connectImpl(current: () => boolean = () => true): Promise<void> {
       await disconnectImpl();
       return;
     }
-    setStatus({ localUrl: endpoint.url, surfaces: describeSurfaces() });
+    setStatus({ localUrl: endpoint.url, keptPortMoved: keptPort && endpoint.port !== keptPort ? { from: keptPort, to: endpoint.port } : null,
+      surfaces: describeSurfaces() });
     if (desktopAutomationSupported() && (caps.screen || caps.control)) void prewarmComputerHelper();
     updateSurface('core', { state: 'starting', detail: 'Connecting…' });
 
@@ -793,6 +796,7 @@ async function disconnectResources(endpointForceAfterMs?: number): Promise<void>
     detail: '',
     publicUrl: null,
     localUrl: null,
+    keptPortMoved: null,
     handshakeAt: null,
     health: null,
     surfaces: describeSurfaces()

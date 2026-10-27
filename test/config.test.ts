@@ -160,6 +160,23 @@ describe('settings migration', () => {
       expect((await loadConfig()).ui.appearance).toEqual({ ...appearance, sidebarLayout: 'projects' });
     }
   });
+  it('loads line spacing and the announcement switch saved before they existed, or damaged, as normal spacing and off', async () => {
+    const { defaultAppearance } = await import('../src/shared/appearance.js');
+    const config = defaultConfig();
+    const appearance = { ...defaultAppearance(), lineSpacing: 140, font: 'legible' as const }; appearance.dark.sidebar = '#e53aa0';
+    await saveConfig({ ...config, ui: { ...config.ui, appearance, announceTurns: true } });
+    expect((await loadConfig()).ui).toMatchObject({ appearance: { lineSpacing: 140, font: 'legible' }, announceTurns: true });
+    const { lineSpacing: _, ...old } = appearance;
+    for (const [saved, announceTurns] of [[old, undefined], [{ ...old, lineSpacing: 145 }, 'yes']] as const) {
+      await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...config, readOnly: true,
+        ui: { ...config.ui, appearance: saved, announceTurns } }), 'utf8');
+      const loaded = await loadConfig();
+      // Each falls back on its own; the colors, the font and the rest of Settings are kept.
+      expect(loaded.ui.appearance).toEqual({ ...appearance, lineSpacing: 100 });
+      expect(loaded.ui.announceTurns).toBeUndefined();
+      expect(loaded.readOnly).toBe(true);
+    }
+  });
   it('drops removed file-saving settings without changing other saved choices', async () => {
     const config = defaultConfig();
     config.readOnly = true;
@@ -215,6 +232,24 @@ describe('settings migration', () => {
     await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, startAtLogin: true, autoConnect: false } });
     expect((await loadConfig()).ui).toMatchObject({ startAtLogin: true, autoConnect: false });
   });
+  it('turns phone notifications off, rather than pointing them at ntfy.sh, when the saved server is damaged', async () => {
+    const phone = { enabled: true, server: 'https://push.example.org', topic: 'cos-fixturetopic234567', needsYou: true, failures: true,
+      finishedAfterMinutes: 5, onlyWhenAway: true, quietHours: null, includeDetails: true };
+    for (const server of ['x'.repeat(3000), 42, null]) {
+      await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...defaultConfig(), ui: { ...defaultConfig().ui, phonePush: { ...phone, server } } }), 'utf8');
+      // Chat details must never go to a server nobody chose: off, and no server at all.
+      expect((await loadConfig()).ui.phonePush, String(server).slice(0, 8)).toMatchObject({ enabled: false, server: '', topic: phone.topic, includeDetails: true });
+    }
+    // Said in the log, once, and never with the damaged value.
+    const { getLog } = await import('../src/main/logger.js');
+    const lines = getLog().filter(entry => entry.message.startsWith('phone notifications: the saved server setting was damaged'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.message).not.toContain('xxxx');
+    // A missing server is the default, as before.
+    const { server: _server, ...withoutServer } = phone;
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...defaultConfig(), ui: { ...defaultConfig().ui, phonePush: withoutServer } }), 'utf8');
+    expect((await loadConfig()).ui.phonePush).toMatchObject({ enabled: true, server: 'https://ntfy.sh' });
+  });
   it('rotates long turns after 30 minutes for fresh, legacy and malformed settings, keeping saved choices', async () => {
     expect(defaultConfig().ui.rotateTurnMinutes).toBe(30);
     const legacy = defaultConfig(); delete legacy.ui.rotateTurnMinutes;
@@ -224,6 +259,16 @@ describe('settings migration', () => {
     expect((await loadConfig()).ui).toMatchObject({ rotateTurnMinutes: 30, startAtLogin: true });
     await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, rotateTurnMinutes: 0 } });
     expect((await loadConfig()).ui.rotateTurnMinutes).toBe(0);
+  });
+  it('keeps the stop fallback for fresh turns off unless chosen, also for legacy and malformed settings', async () => {
+    expect(defaultConfig().ui.rotateStopFallback).toBe(false);
+    const legacy = defaultConfig(); delete legacy.ui.rotateStopFallback;
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(legacy), 'utf8');
+    expect((await loadConfig()).ui.rotateStopFallback).toBe(false);
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...legacy, ui: { ...legacy.ui, rotateStopFallback: 'yes', startAtLogin: true } }), 'utf8');
+    expect((await loadConfig()).ui).toMatchObject({ rotateStopFallback: false, startAtLogin: true });
+    await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, rotateStopFallback: true } });
+    expect((await loadConfig()).ui.rotateStopFallback).toBe(true);
   });
   it('reads other apps’ usage for fresh and legacy settings and keeps it off once switched off', async () => {
     expect(defaultConfig().ui.localAppUsage).toBe(true);
@@ -354,6 +399,8 @@ describe('settings migration', () => {
     expect(loaded.goal.provider).toEqual({ kind: 'openrouter', baseUrl: '' });
     expect(loaded.ui.autoConnect).toBe(true);
     expect(loaded.ui.privacyScreenshots).toBe(false);
+    // #1797: a config from before the secrets shield has it on.
+    expect(loaded.ui.secretsShield).toBe(true);
     // The one tunnel id a pre-split config had is Core's, because Core is the connector
     // the app cannot work without. Desktop is a second, optional tunnel that starts empty
     // rather than inheriting Core's id — publishing Core twice would be worse than not
@@ -1153,6 +1200,15 @@ it('persists optional ordinary new-chat model defaults without inventing them fo
   const loaded = await loadConfig();
   expect(loaded.ui.defaultChatModel).toBe('gpt-5.6-sol');
   expect(loaded.ui.defaultChatReasoning).toBe('xhigh');
+});
+
+it('keeps a Continue prompt, and reads an empty or overlong one as the built-in phrases', async () => {
+  const config = defaultConfig();
+  expect(config.ui.customContinue).toBeUndefined();
+  for (const [stored, read] of [['Keep going.', 'Keep going.'], ['   ', undefined], ['x'.repeat(501), undefined], [42, undefined]] as const) {
+    await saveConfig({ ...config, ui: { ...config.ui, customContinue: stored as string } });
+    expect((await loadConfig()).ui.customContinue, String(stored).slice(0, 20)).toBe(read);
+  }
 });
 
 describe('a settings file the app cannot read as is', () => {

@@ -14,15 +14,20 @@ export interface ModelUsage {
 export interface UsageModelTokens {
   model: string;
   reasoningEffort: string | null;
-  /** Legacy rows with no recorded model use GPT-5.6 High, visibly marked as assumed. */
+  /** True when the recorded tool call has no verified model attribution. */
   assumed: boolean;
   tokens: number;
 }
+/** No model may be assigned without per-call or same-turn native evidence. */
+export const UNKNOWN_USAGE_MODEL = 'unknown';
+export interface RecordedMessageModel { model: string; reasoningEffort: string | null; messages: number }
 export interface UsageOverview {
   /** Account-wide comparison ceiling selected from the observed model catalog. */
   contextTokenCap: number;
   /** Verified native sends, independently of token estimates or provider quotas. */
   messages: { through: number; days: UsageMessageDay[] };
+  /** Verified native sends across recorded history; separate from tool-call token attribution. */
+  recordedMessagesByModel?: RecordedMessageModel[];
   limits: ModelUsage[];
   days: Array<{ date: string; tokens: number; models: UsageModelTokens[] }>;
   models: UsageModelTokens[];
@@ -105,6 +110,8 @@ export function usageModelGroups(rows: readonly UsageModelTokens[]): Array<{ mod
 }
 /** Explicit per-recorded-ID rates, including zero/null, override equivalent-model defaults. */
 export function usageRate(model: string, formula: UsageFormula): number | null | undefined {
+  // Missing provenance cannot be made billable by entering a rate for the sentinel.
+  if (model === UNKNOWN_USAGE_MODEL) return undefined;
   if (Object.hasOwn(formula.rates, model)) return formula.rates[model];
   const canonical = usageModel(model);
   return Object.hasOwn(formula.rates, canonical) ? formula.rates[canonical] : undefined;

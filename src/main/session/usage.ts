@@ -4,7 +4,7 @@ import { listUsageSessions, readEvents } from './store.js';
 import { readDurable, writeDurableSoon } from '../durable.js';
 import { logInfo } from '../logger.js';
 import { eventTokens } from '../../shared/session.js';
-import { usageDateKey, usageMessageFamily, usageModelKey, usageWeekStart, type ModelUsage, type UsageMessageDay, type UsageModelTokens, type UsageOverview } from '../../shared/usage.js';
+import { usageDateKey, usageMessageFamily, usageModelKey, usageWeekStart, UNKNOWN_USAGE_MODEL, type ModelUsage, type UsageMessageDay, type UsageModelTokens, type UsageOverview } from '../../shared/usage.js';
 import { getChatModels } from '../chat-models.js';
 import { isProModel } from '../../shared/chat-models.js';
 // An extension from before 2.1.40 sends wham/usage windows as "shared": they were Codex's all along.
@@ -29,10 +29,16 @@ export function reportedUsageLimits(): ModelUsage[] {
 }
 // One derived cache owns token totals and verified sends. Display preferences project
 // this baseline; only changed canonical session revisions reread transcripts.
-const CACHE_VERSION = 9;
+const CACHE_VERSION = 10;
 const SLOW_OVERVIEW_MS = 250;
 const modelTokens = z.object({ model: z.string().min(1).max(100), reasoningEffort: z.string().max(100).nullable(), assumed: z.boolean(), tokens: z.number().finite().nonnegative() });
-const verifiedMessage = z.object({ id: z.string().min(1).max(512), time: z.number().finite().positive().max(8.64e15), model: z.enum(['gpt-5.6', 'gpt-6']) });
+const verifiedMessage = z.object({
+  id: z.string().min(1).max(512),
+  time: z.number().finite().positive().max(8.64e15),
+  model: z.enum(['gpt-5.6', 'gpt-6']).nullable(),
+  recordedModel: z.string().min(1).max(100),
+  reasoningEffort: z.string().max(100).nullable()
+});
 type VerifiedMessage = z.infer<typeof verifiedMessage>;
 const cacheRow = z.object({ id: z.string().max(64), revision: z.string().max(200), days: z.array(z.tuple([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.array(modelTokens)])).max(36600), messages: z.array(verifiedMessage).max(100000) });
 const cacheSchema = z.object({ version: z.literal(CACHE_VERSION), rows: z.array(cacheRow).max(100000) });
@@ -50,7 +56,7 @@ function mergeModels(target: Map<string, UsageModelTokens>, rows: readonly Usage
   }
 }
 type Attribution = Pick<UsageModelTokens, 'model' | 'reasoningEffort' | 'assumed'>;
-const LEGACY: Attribution = { model: 'gpt-5.6', reasoningEffort: 'high', assumed: true };
+const UNKNOWN: Attribution = { model: UNKNOWN_USAGE_MODEL, reasoningEffort: null, assumed: true };
 function attribution(raw: { model?: string; reasoningEffort?: string }, previous: Attribution): Attribution {
   const model = raw.model?.trim();
   const effort = raw.reasoningEffort?.trim();
@@ -89,8 +95,12 @@ async function computeOverview(signal?: AbortSignal): Promise<UsageOverview> {
       const perDay = new Map<string, Map<string, UsageModelTokens>>();
       let context = 0;
       let conversation: string | null = null;
-      let selected = LEGACY;
-      const calls: Array<{ day: string; attribution: Attribution }> = [];
+      let selected = UNKNOWN;
+      let questionEpoch = 0;
+      const calls: Array<{ day: string; attribution: Attribution; turnKey: string | null; time: number; directModel: boolean }> = [];
+      // A final, server-resolved reply can identify calls in the SAME native question and
+      // turn. Never transfer a model across missing/reused turn IDs or a later question.
+      const replies = new Map<string, { model: string; time: number } | null>();
       const countedCalls = new Set<string>();
       const verified: VerifiedMessage[] = [];
       const finishSegment = () => {
@@ -98,11 +108,20 @@ async function computeOverview(signal?: AbortSignal): Promise<UsageOverview> {
         // Model switches divide attribution, never the frontend context.
         const billingContext = Math.min(context, contextTokenCap);
         for (const call of calls) {
+          const reply = call.turnKey === null ? null : replies.get(call.turnKey);
+          // Explicit per-call metadata wins. A final reply may refine a recorded picker
+          // selection, but never infer a call from a different native question or turn.
+          const attribution = call.directModel || !reply || reply.time < call.time ? call.attribution : {
+            model: reply.model,
+            reasoningEffort: !call.attribution.assumed && call.attribution.model === reply.model
+              ? call.attribution.reasoningEffort : null,
+            assumed: false
+          };
           const totals = perDay.get(call.day) ?? new Map<string, UsageModelTokens>();
-          mergeModels(totals, [{ ...call.attribution, tokens: billingContext / 2 }]);
+          mergeModels(totals, [{ ...attribution, tokens: billingContext / 2 }]);
           perDay.set(call.day, totals);
         }
-        calls.length = 0; context = 0; selected = LEGACY;
+        calls.length = 0; context = 0; selected = UNKNOWN; questionEpoch = 0; replies.clear();
       };
       const events = await readEvents(session.id);
       signal?.throwIfAborted();
@@ -114,19 +133,24 @@ async function computeOverview(signal?: AbortSignal): Promise<UsageOverview> {
         // The delivered native row owns model proof. Never borrow the mutable picker,
         // a later tool's model or LEGACY's token-estimation assumptions for this count.
         if (event.kind === 'user_message' && event.messageId && !event.messageId.startsWith('input:') && event.inputDelivery !== 'offered') {
-          const model = usageMessageFamily(event.model);
+          const recordedModel = event.model?.trim();
           const time = event.authoredAt ?? event.time;
           unproven = null;
           if (Number.isFinite(time) && time > 0 && time <= 8.64e15) {
-            if (model) verified.push({ id: event.messageId, time, model });
-            else if (!event.model) unproven = { id: event.messageId, time };
+            if (recordedModel && recordedModel.length <= 100) verified.push({
+              id: event.messageId, time, model: usageMessageFamily(recordedModel), recordedModel,
+              reasoningEffort: event.reasoningEffort ?? null
+            });
+            else unproven = { id: event.messageId, time };
           }
         } else if (event.kind === 'user_message') {
           unproven = null;
         }
         if (event.kind === 'assistant_message' && unproven && event.resolvedModel) {
           const model = usageMessageFamily(event.resolvedModel);
-          if (model) verified.push({ ...unproven, model });
+          if (event.resolvedModel.trim().length > 0 && event.resolvedModel.trim().length <= 100) verified.push({
+            ...unproven, model, recordedModel: event.resolvedModel.trim(), reasoningEffort: null
+          });
           unproven = null;
         }
         // A code-mode child is local execution evidence, not another model round trip.
@@ -140,12 +164,28 @@ async function computeOverview(signal?: AbortSignal): Promise<UsageOverview> {
         }
         // Recorded selection belongs to this frontend history, never a mutable
         // global picker or a worker's requested-but-unconfirmed spawn setting.
-        if (event.kind === 'user_message' && !event.messageId?.startsWith('input:')) selected = LEGACY;
+        const nativeQuestion = event.kind === 'user_message' && !event.messageId?.startsWith('input:');
+        if (nativeQuestion) {
+          selected = UNKNOWN;
+          questionEpoch++; // Even a legacy question without an ID fences an earlier answer.
+        }
         if (event.kind !== 'user_message' || !event.messageId?.startsWith('input:')) selected = attribution(event, selected);
+        if (event.kind === 'assistant_message' && event.final === true && event.resolvedModel?.trim() &&
+            event.turnId && questionEpoch > 0) {
+          const key = JSON.stringify([questionEpoch, event.turnId]);
+          const previous = replies.get(key);
+          const model = event.resolvedModel.trim();
+          if (!replies.has(key)) replies.set(key, { model, time: event.time });
+          else if (previous?.model !== model) replies.set(key, null); // conflicting proof abstains
+        }
         context += eventTokens(event);
         if (event.kind !== 'tool_call') continue;
         const day = usageDateKey(new Date(event.time));
-        calls.push({ day, attribution: attribution(event.call, selected) });
+        calls.push({
+          day, attribution: attribution(event.call, selected),
+          turnKey: event.turnId && questionEpoch > 0 ? JSON.stringify([questionEpoch, event.turnId]) : null,
+          time: event.time, directModel: Boolean(event.call.model?.trim())
+        });
         if (!conversation) finishSegment();
       }
       finishSegment();
@@ -167,7 +207,10 @@ async function computeOverview(signal?: AbortSignal): Promise<UsageOverview> {
       const previous = messages.get(message.id);
       // Re-observing the same native ID never adds a send, including copied history.
       // Conflicting proof abstains instead of choosing a model or a week arbitrarily.
-      messages.set(message.id, previous === undefined ? message : previous && previous.model === message.model && previous.time === message.time ? previous : null);
+      messages.set(message.id, previous === undefined ? message : previous &&
+        previous.model === message.model && previous.time === message.time &&
+        previous.recordedModel === message.recordedModel && previous.reasoningEffort === message.reasoningEffort
+        ? previous : null);
     }
   }
   const ids = new Set(sessions.map((session) => session.id));
@@ -177,8 +220,14 @@ async function computeOverview(signal?: AbortSignal): Promise<UsageOverview> {
   const through = Date.now();
   const earliest = usageWeekStart((new Date(through).getDay() + 1) % 7, through);
   const messageDays = new Map<string, UsageMessageDay>();
+  const recordedModels = new Map<string, { model: string; reasoningEffort: string | null; messages: number }>();
   for (const message of messages.values()) {
-    if (!message || message.time < earliest || message.time > through) continue;
+    if (!message || message.time > through) continue;
+    const key = JSON.stringify([message.recordedModel, message.reasoningEffort]);
+    const record = recordedModels.get(key) ?? { model: message.recordedModel, reasoningEffort: message.reasoningEffort, messages: 0 };
+    record.messages++;
+    recordedModels.set(key, record);
+    if (message.time < earliest || !message.model) continue;
     const date = usageDateKey(new Date(message.time));
     const day = messageDays.get(date) ?? { date, gpt56: 0, gpt6: 0 };
     day[message.model === 'gpt-6' ? 'gpt6' : 'gpt56']++;
@@ -193,6 +242,7 @@ async function computeOverview(signal?: AbortSignal): Promise<UsageOverview> {
   return {
     contextTokenCap,
     messages: { through, days: [...messageDays.values()].sort((a, b) => a.date.localeCompare(b.date)) },
+    recordedMessagesByModel: [...recordedModels.values()].sort((a, b) => b.messages - a.messages || a.model.localeCompare(b.model)),
     limits: limits.filter((entry) => Date.now() - entry.observedAt <= FRESH_MS && (entry.resetAt === null || entry.resetAt > Date.now())).map((entry) => ({ ...entry })),
     days: [...days].sort(([a], [b]) => a.localeCompare(b)).map(([date, rows]) => ({ date, tokens: [...rows.values()].reduce((sum, row) => sum + row.tokens, 0), models: [...rows.values()] })),
     models: [...models.values()],

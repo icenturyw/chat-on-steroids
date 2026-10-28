@@ -14,6 +14,39 @@ const money = new Intl.NumberFormat('en', { style: 'currency', currency: 'USD', 
 const usd = (value: number) => money.format(value);
 afterEach(() => { dom?.window.close(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.resetModules(); });
 
+it('shows unknown tool usage separately from verified native models, without pricing unknown usage', async () => {
+  dom = new JSDOM(readFileSync(new URL('../src/renderer/index.html', import.meta.url), 'utf8'), { url: 'https://local.test/' });
+  vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document); vi.stubGlobal('localStorage', dom.window.localStorage);
+  const unknown = { model: 'unknown', reasoningEffort: null, assumed: true, tokens: 1e6 };
+  const data: UsageOverview = {
+    contextTokenCap: 256_000, tokens: 1e6, models: [unknown],
+    days: [{ date: '2026-10-28', tokens: 1e6, models: [unknown] }],
+    projects: [], sessions: 2, limits: [], messages: { through: Date.now(), days: [] },
+    recordedMessagesByModel: [
+      { model: 'gpt-6-thinking', reasoningEffort: 'high', messages: 3 },
+      { model: 'gpt-5-6-thinking', reasoningEffort: null, messages: 1 }
+    ]
+  };
+  Object.assign(dom.window, { api: { getUsage: async () => ({ ok: true, data }), getChatModels: async () => ({ ok: true, data: { models: [] } }) } });
+  const { initLanguage, setLanguage } = await import('../src/renderer/i18n.js'); initLanguage();
+  const usage = await import('../src/renderer/usage.js'); usage.initUsage(); await usage.refreshUsage();
+  const document = dom.window.document;
+  const tokenModel = document.querySelector('.usage-days-model')!.textContent!;
+  expect(tokenModel).toContain('Model not recorded');
+  expect(tokenModel).toContain('Rate unknown');
+  expect(tokenModel).not.toContain('gpt-5.6-sol');
+  const verified = document.querySelector('.usage-days-message-model')!.textContent!;
+  expect(verified).toContain('Recorded messages by model');
+  expect(verified).toContain('gpt-6-thinking · high');
+  expect(verified).toContain('gpt-5-6-thinking');
+  expect(verified).toContain('3');
+  expect(document.querySelector('input[aria-label="unknown cached-input USD per million tokens"]')).toBeNull();
+  expect(document.getElementById('usageCost')!.textContent).toContain('1,000,000');
+  setLanguage('zh-CN');
+  expect(document.querySelector('.usage-days-model')!.textContent).toContain('模型未记录');
+  expect(document.querySelector('.usage-days-message-model')!.textContent).toContain('按模型统计的已确认消息');
+  setLanguage('en');
+});
 it('chooses the week start from a weekday menu, keeps exact counts, and restores the weekday after reload', async () => {
   dom = new JSDOM(readFileSync(new URL('../src/renderer/index.html', import.meta.url), 'utf8'), { url: 'https://local.test/' });
   vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document); vi.stubGlobal('localStorage', dom.window.localStorage);

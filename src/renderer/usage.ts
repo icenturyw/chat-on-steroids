@@ -1,6 +1,6 @@
 import { currentLanguage, ui, t, tn } from './i18n.js';
 import { $, el, run, toast } from './dom.js';
-import { DEFAULT_USAGE_FORMULA, usageDateKey as dateKey, usageEstimate, usageMessageTotals, usageModelGroups, usageRate, usageWeekStart, type UsageFormula, type UsageOverview } from '../shared/usage.js';
+import { DEFAULT_USAGE_FORMULA, usageDateKey as dateKey, usageEstimate, usageMessageTotals, usageModelGroups, usageRate, usageWeekStart, UNKNOWN_USAGE_MODEL, type UsageFormula, type UsageOverview } from '../shared/usage.js';
 import type { ProviderUsage } from '../shared/provider-usage.js';
 let snapshot: UsageOverview | null = null;
 let projectNames = new Map<string, string>();
@@ -122,7 +122,7 @@ export async function refreshUsage(fresh = false): Promise<void> {
 function paintRates(): void {
   if (!snapshot) return;
   const host = $('usageRates'); host.replaceChildren();
-  for (const model of [...new Set(snapshot.models.map(row => row.model))].sort()) {
+  for (const model of [...new Set(snapshot.models.map(row => row.model).filter(model => model !== UNKNOWN_USAGE_MODEL))].sort()) {
     const label = el('label', 'setting'); const text = el('span', 'setting-text');
     text.append(el('b', '', model), el('em', '', () => usageRate(model, DEFAULT_USAGE_FORMULA) !== undefined ? t("USD / 1M cached input · editable official baseline, checked 27 September 2026") : t("USD / 1M cached input · enter a verified comparison rate")));
     const input = document.createElement('input'); input.type = 'number'; input.min = '0'; input.step = '0.01'; ui(input, 'placeholder', () => t("Unknown rate")); input.value = usageRate(model, formula)?.toString() ?? '';
@@ -216,8 +216,12 @@ function paintCost(): void {
   modelTable.append(modelHead);
   for (const entry of usageModelGroups(snapshot.models)) {
     const estimate = usageEstimate(entry.sources, formula); const row = el('tr');
-    const name = el('td', '', () => `${entry.model} · ${entry.reasoningEffort ?? t("effort unknown")}${entry.assumed ? t(" (assumed)") : ''}`);
-    usageHint(name, () => t("Recorded IDs: {0}", [[...new Set(entry.sources.map(source => source.model))].join(', ')]));
+    const name = el('td', '', () => entry.model === UNKNOWN_USAGE_MODEL
+      ? `${t("Model not recorded")} · ${entry.reasoningEffort ?? t("effort unknown")}`
+      : `${entry.model} · ${entry.reasoningEffort ?? t("effort unknown")}${entry.assumed ? t(" (assumed)") : ''}`);
+    usageHint(name, () => entry.model === UNKNOWN_USAGE_MODEL
+      ? t("No model was recorded for these tool calls. Their cost has no comparison rate.")
+      : t("Recorded IDs: {0}", [[...new Set(entry.sources.map(source => source.model))].join(', ')]));
     row.append(name, el('td', '', () => Math.round(estimate.tokens).toLocaleString(currentLanguage())), el('td', '', () => estimate.unpricedTokens > 0 && estimate.unpricedTokens === estimate.tokens ? t("Rate unknown") : costText(estimate))); modelTable.append(row);
   }
   // The last 30 days as bars, one glance instead of a long table; the table stays one click away.
@@ -246,6 +250,29 @@ function paintCost(): void {
   const modelSection = el('section', 'usage-days-model');
   modelSection.append(el('h3', 'usage-cost-subhead', () => t('By model')), modelTable);
   const sections = [modelSection];
+  // Native messages provide independently verified model identities even when no tools
+  // were called in their sessions. Never pass their counts off as estimated tool tokens.
+  if (snapshot.recordedMessagesByModel?.length) {
+    const messageTable = el('table', 'usage-table');
+    const messageHead = el('tr');
+    for (const title of ['Recorded model / effort', 'Messages sent']) messageHead.append(el('th', '', () => t(title)));
+    messageTable.append(messageHead);
+    for (const row of snapshot.recordedMessagesByModel) {
+      const tr = el('tr');
+      tr.append(
+        el('td', '', () => `${row.model} · ${row.reasoningEffort ?? t("effort unknown")}`),
+        el('td', '', () => row.messages.toLocaleString(currentLanguage()))
+      );
+      messageTable.append(tr);
+    }
+    const messageSection = el('section', 'usage-days-message-model');
+    messageSection.append(
+      el('h3', 'usage-cost-subhead', () => t('Recorded messages by model')),
+      el('p', 'muted', () => t('From recorded native messages; does not allocate tool tokens or infer missing models.')),
+      messageTable
+    );
+    sections.push(messageSection);
+  }
   // Someone who never uses projects would get one "No project" row; that is not a breakdown.
   if (snapshot.projects.some(entry => entry.projectId !== null)) {
     const projectTable = el('table', 'usage-table'); const projectHead = el('tr');

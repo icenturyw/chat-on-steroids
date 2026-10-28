@@ -15,16 +15,28 @@ Recorded event model and effort metadata establish chronological selection withi
 frontend. Explicit call metadata overrides that call. Native user messages without
 selection evidence reset inheritance; app-injected `input:` rows neither establish
 nor reset it. Frontend changes, session starts and unattributed calls isolate the
-selection. Missing historical selection is visibly assumed GPT-5.6 High. A recorded
-model without effort stays effort-unknown rather than acquiring the legacy default.
+selection. Missing historical selection is shown as **Model not recorded** with unknown
+effort and no comparison rate, never assumed GPT-5.6 High. The usage cache version
+10 rebuilds existing recorded sessions without changing the source recording.
+A recorded model without effort stays effort-unknown rather than acquiring a default.
+When a native question and a server-resolved final reply share the same recorded
+turn, the final reply can refine model attribution for earlier calls in that
+question. Conflicting replies, missing turn proof, later questions, unrelated
+conversations and explicit per-call models are fenced: none may be overridden
+using a guess. Model/effort in another session is not imported by time proximity.
 
 The existing versioned durable usage cache now stores daily model/effort totals.
 Unchanged session revisions reuse them across process restarts. Changed revisions
 rebuild only that session and removed recordings remove their cached contribution.
 The model totals and daily totals derive from the same rows, without a second cache.
 
-Usage displays model/effort token totals and cached-input equivalent costs. The
-divisor, cost multiplier (default 1.2), and each model's USD-per-million cached-input
+Usage displays model/effort token totals and cached-input equivalent costs.
+The **Recorded messages by model** table counts native messages with recorded
+model identities independently of tool calls, including chats with zero tool
+calls. Its counts are not token attribution, provider bills or account limits;
+a model that occurs there does not price an unknown-model tool call. Unknown
+tool models have no rate editor, even if an old formula stored an "unknown" rate.
+The divisor, cost multiplier (default 1.2), and each model's USD-per-million cached-input
 comparison rate are editable display preferences under one localStorage key.
 Changing them projects cached baseline totals without rereading transcripts.
 Verified Sol, Astra and GPT-5.5 rates initialize automatically from the shared
